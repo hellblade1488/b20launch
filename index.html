@@ -267,7 +267,455 @@
 
   <script src="./assets/ethers-6.13.0.umd.min.js"></script>
   <script>
-    // app logic lands in the next commits
+    const E = window.ethers;
+
+    /* ========== network + contract config ========== */
+    // Phase 1: Base Sepolia only. Mainnet entry gets added after the Sepolia test round.
+    const NETWORKS = {
+      "84532": {
+        name: "Base Sepolia",
+        chainHex: "0x14a34",
+        rpc: "https://sepolia.base.org",
+        scan: "https://sepolia.basescan.org",
+        launchpad: "", // B20LaunchPad address — filled in after deploy
+        badge: "Base Sepolia", badgeClass: "testnet",
+      },
+    };
+    const DEFAULT_CHAIN = "84532";
+
+    const FACTORY_ADDR = "0xB20f000000000000000000000000000000000000";
+    const REGISTRY_ADDR = "0x8453000000000000000000000000000000000001";
+    const FEATURE_ASSET = E.keccak256(E.toUtf8Bytes("base.b20_asset"));
+
+    const REGISTRY_ABI = ["function isActivated(bytes32 feature) view returns (bool)"];
+    const LAUNCHPAD_ABI = [
+      "function launch(uint8 variant, bytes32 salt, bytes params, bytes[] initCalls) payable returns (address token)",
+      "function predictAddress(uint8 variant, address creator, bytes32 salt) view returns (address)",
+      "function fee() view returns (uint256)",
+      "event TokenLaunched(address indexed creator, address indexed token, uint8 indexed variant, bytes32 salt)",
+      "error WrongFee(uint256 sent, uint256 required)",
+    ];
+    const FACTORY_ERRORS = [
+      "error TokenAlreadyExists(address token)",
+      "error InvalidVariant()",
+      "error UnsupportedVersion(uint8 version, uint8 variant)",
+      "error MissingRequiredField(string field)",
+      "error InvalidCurrency(string code)",
+      "error InvalidDecimals(uint8 decimals)",
+      "error InitCallFailed(uint256 index)",
+      "error FeatureNotActivated(bytes32 feature)",
+    ];
+    const ERROR_IFACE = new E.Interface([...FACTORY_ERRORS, "error WrongFee(uint256 sent, uint256 required)"]);
+    const TOKEN_ABI = [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)",
+      "function decimals() view returns (uint8)",
+      "function totalSupply() view returns (uint256)",
+    ];
+
+    /* ========== JS port of B20FactoryLib (validated against Sepolia factory via eth_call) ========== */
+    const coder = E.AbiCoder.defaultAbiCoder();
+    const ROLES = {
+      MINT_ROLE: E.id("MINT_ROLE"),
+      PAUSE_ROLE: E.id("PAUSE_ROLE"),
+      UNPAUSE_ROLE: E.id("UNPAUSE_ROLE"),
+    };
+    function encodeAssetCreateParams(name, symbol, initialAdmin, decimals) {
+      return coder.encode(
+        ["tuple(uint8 version, string name, string symbol, address initialAdmin, uint8 decimals)"],
+        [{ version: 1, name, symbol, initialAdmin, decimals }]
+      );
+    }
+    const IB20 = new E.Interface([
+      "function grantRole(bytes32 role, address account)",
+      "function updateSupplyCap(uint256 newSupplyCap)",
+      "function batchMint(address[] recipients, uint256[] amounts)",
+    ]);
+    const encodeGrantRole = (role, account) => IB20.encodeFunctionData("grantRole", [role, account]);
+    const encodeUpdateSupplyCap = (cap) => IB20.encodeFunctionData("updateSupplyCap", [cap]);
+    const encodeBatchMint = (recipients, amounts) => IB20.encodeFunctionData("batchMint", [recipients, amounts]);
+
+    const MAX_SUPPLY_CAP = (1n << 128n) - 1n; // uint128.max
+
+    /* ========== dom ========== */
+    const $ = (id) => document.getElementById(id);
+    const walletArea = $("wallet-area"), bannerArea = $("banner-area");
+    const createCard = $("create-card"), launchBtn = $("launch-btn"), launchResult = $("launch-result");
+    const successCard = $("success-card");
+    const pAddr = $("p-addr"), pGas = $("p-gas");
+    const tokenList = $("token-list"), tokenEmpty = $("token-empty");
+
+    /* ========== state ========== */
+    let provider = null, signer = null, userAddress = null, currentChainId = null;
+    let launching = false;
+
+    const DISCONNECTED_KEY = "b20launch_disconnected";
+    const TOKENS_KEY = "b20launch_tokens";
+    const isManuallyDisconnected = () => { try { return localStorage.getItem(DISCONNECTED_KEY) === "1"; } catch { return false; } };
+    const setManuallyDisconnected = (v) => { try { v ? localStorage.setItem(DISCONNECTED_KEY, "1") : localStorage.removeItem(DISCONNECTED_KEY); } catch {} };
+
+    const shorten = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+    const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const netConf = () => NETWORKS[String(currentChainId)] || null;
+    const showToast = (kind, html) => { launchResult.innerHTML = `<div class="toast ${kind}">${html}</div>`; };
+    const clearToast = () => { launchResult.innerHTML = ""; };
+
+    function decodeError(err) {
+      const data = err?.data?.data || err?.data || err?.info?.error?.data;
+      if (typeof data === "string" && data.startsWith("0x") && data.length > 10) {
+        try {
+          const parsed = ERROR_IFACE.parseError(data);
+          const friendly = {
+            TokenAlreadyExists: "A token already exists for this salt — just press Launch again (a fresh salt is generated every attempt).",
+            InvalidDecimals: "Decimals must be between 6 and 18.",
+            InvalidCurrency: "Currency code must be uppercase A–Z letters only.",
+            MissingRequiredField: "A required field is empty.",
+            InitCallFailed: "One of the setup calls failed — check supply cap vs initial supply.",
+            FeatureNotActivated: "B20 is not activated on this network.",
+            WrongFee: "Fee mismatch — reload the page and try again.",
+          }[parsed.name];
+          return friendly || `${parsed.name}(${parsed.args.join(", ")})`;
+        } catch {}
+      }
+      if (err?.code === "ACTION_REJECTED" || err?.code === 4001) return "Transaction rejected in wallet.";
+      if (err?.code === "INSUFFICIENT_FUNDS") return "Not enough ETH for gas on this network.";
+      return err?.shortMessage || err?.message || "Unknown error";
+    }
+
+    /* ========== wallet ========== */
+    function renderConnected(isRightNet) {
+      const conf = netConf();
+      walletArea.innerHTML =
+        `<button class="net-pill ${isRightNet ? "ok" : "wrong"}" id="net-pill"><span class="net-dot"></span>${isRightNet ? conf.name : "Wrong network"}</button>` +
+        `<div class="addr-group"><span class="addr-pill"><span class="dot"></span>${shorten(userAddress)}</span><button class="disconnect-btn" id="disconnect-btn" title="Disconnect">×</button></div>`;
+      $("net-pill").addEventListener("click", switchNetwork);
+      $("disconnect-btn").addEventListener("click", disconnectWallet);
+    }
+    function renderDisconnected() {
+      walletArea.innerHTML = `<button id="connect-btn">Connect Wallet</button>`;
+      $("connect-btn").addEventListener("click", () => connectWallet(false));
+    }
+
+    async function connectWallet(silent) {
+      if (!window.ethereum) {
+        if (!silent) showToast("error", "No wallet found. Install MetaMask, Rabby or Coinbase Wallet.");
+        return;
+      }
+      try {
+        provider = new E.BrowserProvider(window.ethereum);
+        const accounts = silent
+          ? await provider.send("eth_accounts", [])
+          : await provider.send("eth_requestAccounts", []);
+        if (!accounts.length) { renderDisconnected(); return; }
+        signer = await provider.getSigner();
+        userAddress = E.getAddress(accounts[0]);
+        setManuallyDisconnected(false);
+        const net = await provider.getNetwork();
+        currentChainId = Number(net.chainId);
+        onWalletChanged();
+      } catch (e) {
+        if (!silent) showToast("error", escapeHtml(decodeError(e)));
+      }
+    }
+
+    function disconnectWallet() {
+      setManuallyDisconnected(true);
+      provider = signer = userAddress = currentChainId = null;
+      renderDisconnected();
+      onWalletChanged();
+    }
+
+    async function switchNetwork() {
+      const conf = NETWORKS[DEFAULT_CHAIN];
+      try {
+        await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: conf.chainHex }] });
+      } catch (err) {
+        if (err.code === 4902) {
+          await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+            chainId: conf.chainHex, chainName: conf.name,
+            nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+            rpcUrls: [conf.rpc], blockExplorerUrls: [conf.scan],
+          }]});
+        }
+      }
+    }
+
+    function onWalletChanged() {
+      const conf = netConf();
+      bannerArea.innerHTML = "";
+      if (!userAddress) {
+        renderDisconnected();
+        launchBtn.disabled = true;
+        launchBtn.textContent = "Connect wallet to launch";
+        pAddr.textContent = "connect wallet to preview";
+        pGas.textContent = "—";
+        renderTokens();
+        return;
+      }
+      renderConnected(!!conf);
+      if (!conf) {
+        bannerArea.innerHTML = `<div class="warn-banner"><span>You're on an unsupported network. B20 Launcher runs on <b>${NETWORKS[DEFAULT_CHAIN].name}</b> for now.</span><button id="switch-btn">Switch network</button></div>`;
+        $("switch-btn").addEventListener("click", switchNetwork);
+        launchBtn.disabled = true;
+        launchBtn.textContent = "Wrong network";
+        renderTokens();
+        return;
+      }
+      if (!$("f-admin").value) $("f-admin").value = userAddress;
+      checkActivationAndContract();
+      renderTokens();
+      refreshPreview();
+    }
+
+    /* ========== activation + contract presence check ========== */
+    async function checkActivationAndContract() {
+      const conf = netConf();
+      if (!conf) return;
+      try {
+        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
+        const registry = new E.Contract(REGISTRY_ADDR, REGISTRY_ABI, ro);
+        const active = await registry.isActivated(FEATURE_ASSET);
+        if (!active) {
+          bannerArea.innerHTML = `<div class="warn-banner"><span>B20 is not activated on ${conf.name} yet. Check back soon.</span></div>`;
+          launchBtn.disabled = true;
+          launchBtn.textContent = "B20 not activated";
+          return;
+        }
+        if (!conf.launchpad) {
+          bannerArea.innerHTML = `<div class="warn-banner"><span>The launcher contract is not deployed on ${conf.name} yet — launch day is close. Follow progress on <a href="https://github.com/hellblade1488/b20launch" target="_blank" rel="noopener">GitHub</a>.</span></div>`;
+          launchBtn.disabled = true;
+          launchBtn.textContent = "Contract pending deploy";
+          return;
+        }
+        $("footer-contract").href = `${conf.scan}/address/${conf.launchpad}`;
+        launchBtn.disabled = false;
+        launchBtn.textContent = "🚀 Launch token";
+      } catch {
+        bannerArea.innerHTML = `<div class="warn-banner"><span>Could not reach ${conf.name} RPC. Check your connection and reload.</span></div>`;
+      }
+    }
+
+    /* ========== form validation ========== */
+    function setFieldError(input, errEl, msg) {
+      if (msg) { input.classList.add("invalid"); errEl.textContent = msg; errEl.style.display = "block"; }
+      else { input.classList.remove("invalid"); errEl.textContent = ""; errEl.style.display = "none"; }
+      return !msg;
+    }
+
+    function parseAmount(str, decimals) {
+      const clean = str.trim().replace(/[\s,_']/g, "");
+      if (!clean) return null;
+      if (!/^\d+(\.\d+)?$/.test(clean)) throw new Error("not a number");
+      return E.parseUnits(clean, decimals);
+    }
+
+    function readForm() {
+      const name = $("f-name").value.trim();
+      const symbol = $("f-symbol").value.trim().toUpperCase();
+      const decimals = Number($("f-decimals").value);
+      const adminRaw = $("f-admin").value.trim();
+      let ok = true;
+
+      ok = setFieldError($("f-name"), $("e-name"), name ? "" : "Name is required") && ok;
+      ok = setFieldError($("f-symbol"), $("e-symbol"), symbol ? "" : "Symbol is required") && ok;
+
+      let admin = null;
+      if (!adminRaw) { ok = setFieldError($("f-admin"), $("e-admin"), "Admin address is required") && ok; }
+      else if (!E.isAddress(adminRaw)) { ok = setFieldError($("f-admin"), $("e-admin"), "Not a valid address") && ok; }
+      else { admin = E.getAddress(adminRaw); setFieldError($("f-admin"), $("e-admin"), ""); }
+
+      let cap = null;
+      try {
+        cap = parseAmount($("f-cap").value, decimals);
+        if (cap !== null && cap > MAX_SUPPLY_CAP) { ok = setFieldError($("f-cap"), $("e-cap"), "Cap exceeds uint128 max") && ok; }
+        else if (cap !== null && cap === 0n) { ok = setFieldError($("f-cap"), $("e-cap"), "Cap must be > 0 (or empty for no cap)") && ok; }
+        else setFieldError($("f-cap"), $("e-cap"), "");
+      } catch { ok = setFieldError($("f-cap"), $("e-cap"), "Not a valid number") && ok; }
+
+      let mint = null;
+      try {
+        mint = parseAmount($("f-mint").value, decimals);
+        if (mint !== null && mint > MAX_SUPPLY_CAP) { ok = setFieldError($("f-mint"), $("e-mint"), "Exceeds uint128 max") && ok; }
+        else if (mint !== null && cap !== null && mint > cap) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply exceeds the cap") && ok; }
+        else setFieldError($("f-mint"), $("e-mint"), "");
+      } catch { ok = setFieldError($("f-mint"), $("e-mint"), "Not a valid number") && ok; }
+
+      return { ok, name, symbol, decimals, admin, cap, mint };
+    }
+
+    function buildInitCalls(f) {
+      const calls = [];
+      const wantMintRole = $("c-mint-role").checked || f.mint !== null;
+      if (wantMintRole && f.admin) calls.push(encodeGrantRole(ROLES.MINT_ROLE, f.admin));
+      if ($("c-pause-role").checked && f.admin) {
+        calls.push(encodeGrantRole(ROLES.PAUSE_ROLE, f.admin));
+        calls.push(encodeGrantRole(ROLES.UNPAUSE_ROLE, f.admin));
+      }
+      if (f.cap !== null) calls.push(encodeUpdateSupplyCap(f.cap));
+      if (f.mint !== null && f.mint > 0n && f.admin) calls.push(encodeBatchMint([f.admin], [f.mint]));
+      return calls;
+    }
+
+    function makeSalt(f) {
+      return E.keccak256(E.toUtf8Bytes(`${userAddress}|${f.name}|${f.symbol}|${Date.now()}|${Math.random()}`));
+    }
+
+    /* ========== preview: predicted address + gas estimate ========== */
+    let previewTimer = null;
+    function refreshPreview() { clearTimeout(previewTimer); previewTimer = setTimeout(doPreview, 500); }
+
+    async function doPreview() {
+      const conf = netConf();
+      if (!userAddress || !conf || !conf.launchpad) return;
+      const f = readForm();
+      if (!f.ok || !f.admin) { pAddr.textContent = "fix the form to preview"; pGas.textContent = "—"; return; }
+      try {
+        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
+        const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, ro);
+        const salt = E.keccak256(E.toUtf8Bytes("preview")); // address depends on salt; show shape only for a fixed one
+        const predicted = await pad.predictAddress(0, userAddress, salt);
+        pAddr.textContent = `${predicted.slice(0, 8)}… (final address depends on launch salt)`;
+        const params = encodeAssetCreateParams(f.name, f.symbol, f.admin, f.decimals);
+        const data = pad.interface.encodeFunctionData("launch", [0, salt, params, buildInitCalls(f)]);
+        const [gas, feeData] = await Promise.all([
+          ro.estimateGas({ from: userAddress, to: conf.launchpad, data }),
+          ro.getFeeData(),
+        ]);
+        const costWei = gas * (feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n);
+        pGas.textContent = `~${parseFloat(E.formatEther(costWei)).toFixed(6)} ETH (${gas} gas)`;
+      } catch {
+        pAddr.textContent = "preview unavailable";
+        pGas.textContent = "—";
+      }
+    }
+
+    /* ========== launch ========== */
+    async function launch() {
+      if (launching) return;
+      const conf = netConf();
+      if (!conf || !conf.launchpad || !signer) return;
+      const f = readForm();
+      if (!f.ok) { showToast("error", "Fix the highlighted fields first."); return; }
+
+      launching = true;
+      launchBtn.disabled = true;
+      successCard.style.display = "none";
+      try {
+        const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, signer);
+        const params = encodeAssetCreateParams(f.name, f.symbol, f.admin, f.decimals);
+        const initCalls = buildInitCalls(f);
+        const salt = makeSalt(f);
+        const fee = await pad.fee();
+
+        // dry-run first: catches encoding/param errors before any gas is spent
+        showToast("info", "Simulating transaction…");
+        launchBtn.textContent = "Simulating…";
+        const predictedToken = await pad.launch.staticCall(0, salt, params, initCalls, { value: fee });
+
+        showToast("info", "Confirm the transaction in your wallet…");
+        launchBtn.textContent = "Confirm in wallet…";
+        const tx = await pad.launch(0, salt, params, initCalls, { value: fee });
+
+        showToast("info", `Waiting for confirmation… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
+        launchBtn.textContent = "Waiting for confirmation…";
+        const receipt = await tx.wait();
+
+        // read the token address from the TokenLaunched event (fall back to the dry-run value)
+        let token = predictedToken;
+        for (const log of receipt.logs) {
+          try {
+            const parsed = pad.interface.parseLog(log);
+            if (parsed?.name === "TokenLaunched") { token = parsed.args.token; break; }
+          } catch {}
+        }
+
+        saveToken(token, f, conf);
+        clearToast();
+        showSuccess(token, f, conf);
+        renderTokens();
+      } catch (e) {
+        showToast("error", escapeHtml(decodeError(e)));
+      } finally {
+        launching = false;
+        launchBtn.disabled = false;
+        launchBtn.textContent = "🚀 Launch token";
+      }
+    }
+
+    function showSuccess(token, f, conf) {
+      $("s-addr").textContent = token;
+      $("s-scan").href = `${conf.scan}/token/${token}`;
+      const text = encodeURIComponent(`Just launched $${f.symbol} — a native B20 token on @base — in one click with b20launch.com 🚀\n\n${conf.scan}/token/${token}`);
+      $("s-share").href = `https://twitter.com/intent/tweet?text=${text}`;
+      successCard.style.display = "block";
+      successCard.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    /* ========== my tokens (localStorage + on-chain enrichment) ========== */
+    function loadSaved() { try { return JSON.parse(localStorage.getItem(TOKENS_KEY) || "[]"); } catch { return []; } }
+    function saveToken(token, f, conf) {
+      const list = loadSaved();
+      list.unshift({ address: token, name: f.name, symbol: f.symbol, chainId: String(currentChainId), owner: userAddress, ts: Date.now() });
+      try { localStorage.setItem(TOKENS_KEY, JSON.stringify(list.slice(0, 100))); } catch {}
+    }
+
+    async function renderTokens() {
+      const mine = userAddress ? loadSaved().filter((t) => t.owner === userAddress) : [];
+      if (!userAddress) { tokenList.innerHTML = `<div class="empty">Connect your wallet to see tokens you launched.</div>`; return; }
+      if (!mine.length) { tokenList.innerHTML = `<div class="empty">No tokens yet — your launches will show up here.</div>`; return; }
+      tokenList.innerHTML = mine.map((t, i) => {
+        const conf = NETWORKS[t.chainId];
+        const scan = conf ? `${conf.scan}/token/${t.address}` : "#";
+        return `<div class="token-item" data-i="${i}">
+          <div><span class="t-name">${escapeHtml(t.name)}</span><span class="t-sym">$${escapeHtml(t.symbol)}</span>
+            <div class="t-addr"><a href="${scan}" target="_blank" rel="noopener" class="mono">${t.address}</a></div></div>
+          <div class="t-supply" id="supply-${i}">…</div>
+        </div>`;
+      }).join("");
+      // enrich with live totalSupply
+      for (let i = 0; i < mine.length; i++) {
+        const t = mine[i], conf = NETWORKS[t.chainId];
+        if (!conf) continue;
+        try {
+          const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
+          const c = new E.Contract(t.address, TOKEN_ABI, ro);
+          const [supply, dec] = await Promise.all([c.totalSupply(), c.decimals()]);
+          const el = $(`supply-${i}`);
+          if (el) el.textContent = `${Number(E.formatUnits(supply, dec)).toLocaleString()} ${t.symbol}`;
+        } catch { const el = $(`supply-${i}`); if (el) el.textContent = ""; }
+      }
+    }
+
+    /* ========== init ========== */
+    function init() {
+      const sel = $("f-decimals");
+      for (let d = 6; d <= 18; d++) {
+        const o = document.createElement("option");
+        o.value = d; o.textContent = d === 18 ? "18 (standard)" : d === 6 ? "6 (USDC-style)" : String(d);
+        sel.appendChild(o);
+      }
+      sel.value = "18";
+
+      launchBtn.addEventListener("click", launch);
+      ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin"].forEach((id) => $(id).addEventListener("input", refreshPreview));
+      ["c-mint-role", "c-pause-role"].forEach((id) => $(id).addEventListener("change", refreshPreview));
+
+      $("s-copy").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText($("s-addr").textContent); $("s-copy").textContent = "Copied ✓"; setTimeout(() => ($("s-copy").textContent = "Copy address"), 1500); } catch {}
+      });
+
+      if (window.ethereum) {
+        window.ethereum.on?.("accountsChanged", (acc) => {
+          if (!acc.length) { disconnectWallet(); return; }
+          userAddress = E.getAddress(acc[0]);
+          connectWallet(true);
+        });
+        window.ethereum.on?.("chainChanged", () => connectWallet(true));
+        if (!isManuallyDisconnected()) connectWallet(true);
+      }
+      renderTokens();
+    }
+    init();
   </script>
 </body>
 </html>
