@@ -277,8 +277,15 @@
     const E = window.ethers;
 
     /* ========== network + contract config ========== */
-    // Phase 1: Base Sepolia only. Mainnet entry gets added after the Sepolia test round.
     const NETWORKS = {
+      "8453": {
+        name: "Base",
+        chainHex: "0x2105",
+        rpc: "https://mainnet.base.org",
+        scan: "https://basescan.org",
+        launchpad: "", // B20LaunchPad mainnet — pending deploy
+        badge: "Base Mainnet", badgeClass: "",
+      },
       "84532": {
         name: "Base Sepolia",
         chainHex: "0x14a34",
@@ -441,7 +448,11 @@
     }
 
     async function switchNetwork() {
-      const conf = NETWORKS[DEFAULT_CHAIN];
+      // from a supported network the pill toggles to the other one; from anywhere else — to the default
+      const target = String(currentChainId) === "8453" ? "84532"
+        : String(currentChainId) === "84532" ? "8453"
+        : DEFAULT_CHAIN;
+      const conf = NETWORKS[target];
       try {
         await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: conf.chainHex }] });
       } catch (err) {
@@ -468,6 +479,11 @@
         return;
       }
       renderConnected(!!conf);
+      if (conf) {
+        const badge = $("net-badge");
+        badge.textContent = conf.badge;
+        badge.className = "badge" + (conf.badgeClass ? " " + conf.badgeClass : "");
+      }
       if (!conf) {
         bannerArea.innerHTML = `<div class="warn-banner"><span>You're on an unsupported network. B20 Launcher runs on <b>${NETWORKS[DEFAULT_CHAIN].name}</b> for now.</span><button id="switch-btn">Switch network</button></div>`;
         $("switch-btn").addEventListener("click", switchNetwork);
