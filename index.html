@@ -333,14 +333,28 @@
     }
     async function roTry(chainKey, fn) {
       let lastErr;
-      for (const p of roProviders(chainKey)) {
-        try { return await fn(p); } catch (e) {
-          lastErr = e;
-          // a contract revert is a real answer, not an RPC failure — don't retry it elsewhere
-          if (e?.data || e?.info?.error?.data) throw e;
+      for (let round = 0; round < 2; round++) { // two full passes: survives cold-start hiccups
+        for (const p of roProviders(chainKey)) {
+          try { return await fn(p); } catch (e) {
+            lastErr = e;
+            // a contract revert is a real answer, not an RPC failure — don't retry it elsewhere
+            if (e?.data || e?.info?.error?.data) throw e;
+          }
         }
       }
       throw lastErr;
+    }
+
+    // receipt polling over public RPCs — wallet providers are too flaky to trust for tx.wait()
+    async function waitForReceipt(chainKey, hash) {
+      for (let i = 0; i < 90; i++) {
+        try {
+          const r = await roTry(chainKey, (p) => p.getTransactionReceipt(hash));
+          if (r) return r;
+        } catch {}
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+      return null;
     }
 
     const FACTORY_ADDR = "0xB20f000000000000000000000000000000000000";
@@ -618,6 +632,7 @@
         return;
       }
       if (!$("f-admin").value) $("f-admin").value = userAddress;
+      roTry(String(currentChainId), (p) => p.getBlockNumber()).catch(() => {}); // warm up RPC connections
       checkActivationAndContract();
       renderTokens();
       refreshPreview();
@@ -733,7 +748,10 @@
     }
 
     function makeSalt(f) {
-      return E.keccak256(E.toUtf8Bytes(`${userAddress}|${f.name}|${f.symbol}|${Date.now()}|${Math.random()}`));
+      // deterministic per form content: re-clicking Launch with the same form can never create a duplicate token
+      return E.keccak256(E.toUtf8Bytes(
+        [userAddress, currentVariant, f.name, f.symbol, f.decimals, f.currency || "", String(f.cap ?? ""), String(f.mint ?? "")].join("|")
+      ));
     }
 
     /* ========== preview: predicted address + gas estimate ========== */
@@ -807,7 +825,18 @@
 
         showToast("info", `Waiting for confirmation… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
         launchBtn.textContent = "Waiting for confirmation…";
-        const receipt = await tx.wait();
+        // once the tx hash exists we never show a false error: poll public RPCs for the receipt
+        let receipt = null;
+        try { receipt = await tx.wait(); } catch {}
+        if (!receipt) receipt = await waitForReceipt(chainKey, tx.hash);
+        if (!receipt) {
+          showToast("info", `Transaction sent, network is slow to confirm — track it on <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">BaseScan</a>. Do not relaunch: the same form can't create a duplicate.`);
+          return;
+        }
+        if (receipt.status !== 1) {
+          showToast("error", `Transaction reverted — details on <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">BaseScan</a>.`);
+          return;
+        }
 
         // read the token address from the TokenLaunched event (fall back to the dry-run value)
         let token = predictedToken;
@@ -848,30 +877,60 @@
       try { localStorage.setItem(TOKENS_KEY, JSON.stringify(list.slice(0, 100))); } catch {}
     }
 
+    // on-chain recovery: TokenLaunched events by this creator (survives cleared localStorage / domain moves)
+    const recoverCache = {};
+    async function recoverOnchainTokens(chainKey) {
+      const cacheKey = chainKey + "|" + userAddress;
+      if (recoverCache[cacheKey]) return recoverCache[cacheKey];
+      const conf = NETWORKS[chainKey];
+      if (!conf?.launchpad || !userAddress) return [];
+      try {
+        const list = await roTry(chainKey, async (p) => {
+          const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, p);
+          const latest = await p.getBlockNumber();
+          const out = [];
+          for (let from = Math.max(0, latest - 10000); from <= latest; from += 1000) {
+            const evs = await pad.queryFilter(pad.filters.TokenLaunched(userAddress), from, Math.min(from + 999, latest));
+            for (const e of evs) out.push({ address: e.args.token, variant: Number(e.args.variant), chainId: chainKey, owner: userAddress, name: "", symbol: "" });
+          }
+          return out;
+        });
+        recoverCache[cacheKey] = list;
+        return list;
+      } catch { return []; }
+    }
+
     async function renderTokens() {
-      const mine = userAddress ? loadSaved().filter((t) => t.owner === userAddress) : [];
       if (!userAddress) { tokenList.innerHTML = `<div class="empty">Connect your wallet to see tokens you launched.</div>`; return; }
+      const saved = loadSaved().filter((t) => t.owner === userAddress);
+      let mine = saved;
+      if (netConf()) {
+        const recovered = await recoverOnchainTokens(String(currentChainId));
+        const known = new Set(saved.map((t) => t.address.toLowerCase()));
+        mine = saved.concat(recovered.filter((t) => !known.has(t.address.toLowerCase())));
+      }
       if (!mine.length) { tokenList.innerHTML = `<div class="empty">No tokens yet — your launches will show up here.</div>`; return; }
       tokenList.innerHTML = mine.map((t, i) => {
         const conf = NETWORKS[t.chainId];
         const scan = conf ? `${conf.scan}/token/${t.address}` : "#";
         return `<div class="token-item" data-i="${i}">
-          <div><span class="t-name">${escapeHtml(t.name)}</span><span class="t-sym">$${escapeHtml(t.symbol)}</span>
+          <div><span class="t-name" id="name-${i}">${escapeHtml(t.name || "…")}</span><span class="t-sym" id="sym-${i}">${t.symbol ? "$" + escapeHtml(t.symbol) : ""}</span>
             <div class="t-addr"><a href="${scan}" target="_blank" rel="noopener" class="mono">${t.address}</a></div></div>
           <div class="t-supply" id="supply-${i}">…</div>
         </div>`;
       }).join("");
-      // enrich with live totalSupply
+      // enrich with live name/symbol/totalSupply
       for (let i = 0; i < mine.length; i++) {
         const t = mine[i], conf = NETWORKS[t.chainId];
         if (!conf) continue;
         try {
-          const [supply, dec] = await roTry(t.chainId, (p) => {
+          const [supply, dec, nm, sym] = await roTry(t.chainId, (p) => {
             const c = new E.Contract(t.address, TOKEN_ABI, p);
-            return Promise.all([c.totalSupply(), c.decimals()]);
+            return Promise.all([c.totalSupply(), c.decimals(), c.name(), c.symbol()]);
           });
-          const el = $(`supply-${i}`);
-          if (el) el.textContent = `${Number(E.formatUnits(supply, dec)).toLocaleString()} ${t.symbol}`;
+          const supplyEl = $(`supply-${i}`);
+          if (supplyEl) supplyEl.textContent = `${Number(E.formatUnits(supply, dec)).toLocaleString()} ${sym}`;
+          if (!t.name) { const n = $(`name-${i}`), s = $(`sym-${i}`); if (n) n.textContent = nm || "(unnamed)"; if (s) s.textContent = sym ? "$" + sym : ""; }
         } catch { const el = $(`supply-${i}`); if (el) el.textContent = ""; }
       }
     }
