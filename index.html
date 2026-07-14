@@ -419,7 +419,7 @@
       }
       if (err?.code === "ACTION_REJECTED" || err?.code === 4001) return "Transaction rejected in wallet.";
       if (err?.code === "INSUFFICIENT_FUNDS") return "Not enough ETH for gas on this network.";
-      if (/missing revert data|failed to fetch|network error|timeout/i.test(err?.message || "")) {
+      if (/missing revert data|could not coalesce|failed to fetch|network error|timeout/i.test(err?.message || "")) {
         return "The RPC node glitched during simulation — wait a few seconds and click Launch again.";
       }
       return err?.shortMessage || err?.message || "Unknown error";
@@ -758,9 +758,18 @@
         launchBtn.textContent = "Simulating…";
         const predictedToken = await roPad.launch.staticCall(currentVariant, salt, params, initCalls, { value: fee, from: userAddress });
 
+        // estimate gas on the public RPC and hand the wallet a ready limit —
+        // MetaMask's own Base node often fails estimation ("could not coalesce error")
+        const gasLimit = await ro.estimateGas({
+          from: userAddress,
+          to: conf.launchpad,
+          value: fee,
+          data: pad.interface.encodeFunctionData("launch", [currentVariant, salt, params, initCalls]),
+        });
+
         showToast("info", "Confirm the transaction in your wallet…");
         launchBtn.textContent = "Confirm in wallet…";
-        const tx = await pad.launch(currentVariant, salt, params, initCalls, { value: fee });
+        const tx = await pad.launch(currentVariant, salt, params, initCalls, { value: fee, gasLimit: (gasLimit * 130n) / 100n });
 
         showToast("info", `Waiting for confirmation… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
         launchBtn.textContent = "Waiting for confirmation…";
