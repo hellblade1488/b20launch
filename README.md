@@ -31,7 +31,7 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the technical details.
 
 | Network | B20LaunchPad |
 |---|---|
-| Base Sepolia | *(pending)* |
+| Base Sepolia | [`0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90`](https://sepolia.basescan.org/address/0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90) |
 | Base Mainnet | *(pending)* |
 
 ## Stack
