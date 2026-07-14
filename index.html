@@ -230,9 +230,9 @@
       </div>
 
       <div class="checkbox-row">
-        <input type="checkbox" id="c-mint-role" checked />
+        <input type="checkbox" id="c-mint-role" />
         <label for="c-mint-role">Grant <b>MINT_ROLE</b> to admin
-          <span class="sub">lets the admin mint more tokens later; required if you set an initial supply</span></label>
+          <span class="sub">lets the admin mint more tokens later; the initial supply is minted either way</span></label>
       </div>
       <div class="checkbox-row">
         <input type="checkbox" id="c-pause-role" />
@@ -708,8 +708,7 @@
 
     function buildInitCalls(f) {
       const calls = [];
-      const wantMintRole = $("c-mint-role").checked || f.mint !== null;
-      if (wantMintRole && f.admin) calls.push(encodeGrantRole(ROLES.MINT_ROLE, f.admin));
+      if ($("c-mint-role").checked && f.admin) calls.push(encodeGrantRole(ROLES.MINT_ROLE, f.admin));
       if ($("c-pause-role").checked && f.admin) {
         calls.push(encodeGrantRole(ROLES.PAUSE_ROLE, f.admin));
         calls.push(encodeGrantRole(ROLES.UNPAUSE_ROLE, f.admin));
