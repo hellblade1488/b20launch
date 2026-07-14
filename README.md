@@ -2,7 +2,7 @@
 
 **Deploy your own B20 token on Base in one transaction. No CLI, no Foundry, no Solidity.**
 
-🌐 Live: [b20launch.com](https://b20launch.com) *(coming soon)*
+Live: [b20launch.com](https://b20launch.com) *(coming soon)*
 
 ## What is this?
 
