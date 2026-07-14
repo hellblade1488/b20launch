@@ -300,6 +300,7 @@
         name: "Base",
         chainHex: "0x2105",
         rpc: "https://mainnet.base.org",
+        rpcs: ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"],
         scan: "https://basescan.org",
         launchpad: "0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71", // B20LaunchPad, deployed 2026-07-14
         badge: "Base Mainnet", badgeClass: "",
@@ -308,12 +309,33 @@
         name: "Base Sepolia",
         chainHex: "0x14a34",
         rpc: "https://sepolia.base.org",
+        rpcs: ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com"],
         scan: "https://sepolia.basescan.org",
         launchpad: "0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90", // B20LaunchPad, deployed 2026-07-14
         badge: "Base Sepolia", badgeClass: "testnet",
       },
     };
     const DEFAULT_CHAIN = "8453";
+
+    // cached read-only providers with automatic failover across public RPCs
+    const roCache = {};
+    function roProviders(chainKey) {
+      if (!roCache[chainKey]) {
+        roCache[chainKey] = NETWORKS[chainKey].rpcs.map((u) => new E.JsonRpcProvider(u, undefined, { staticNetwork: true }));
+      }
+      return roCache[chainKey];
+    }
+    async function roTry(chainKey, fn) {
+      let lastErr;
+      for (const p of roProviders(chainKey)) {
+        try { return await fn(p); } catch (e) {
+          lastErr = e;
+          // a contract revert is a real answer, not an RPC failure — don't retry it elsewhere
+          if (e?.data || e?.info?.error?.data) throw e;
+        }
+      }
+      throw lastErr;
+    }
 
     const FACTORY_ADDR = "0xB20f000000000000000000000000000000000000";
     const REGISTRY_ADDR = "0x8453000000000000000000000000000000000001";
@@ -600,12 +622,10 @@
       const conf = netConf();
       if (!conf) return;
       try {
-        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
-        const registry = new E.Contract(REGISTRY_ADDR, REGISTRY_ABI, ro);
-        const [activeAsset, activeStable] = await Promise.all([
-          registry.isActivated(FEATURE_ASSET),
-          registry.isActivated(FEATURE_STABLECOIN),
-        ]);
+        const [activeAsset, activeStable] = await roTry(String(currentChainId), (p) => {
+          const registry = new E.Contract(REGISTRY_ADDR, REGISTRY_ABI, p);
+          return Promise.all([registry.isActivated(FEATURE_ASSET), registry.isActivated(FEATURE_STABLECOIN)]);
+        });
         $("tab-stablecoin").disabled = !activeStable;
         const active = activeAsset;
         if (!active) {
@@ -713,18 +733,19 @@
       const f = readForm();
       if (!f.ok || !f.admin) { pAddr.textContent = "fix the form to preview"; pGas.textContent = "—"; return; }
       try {
-        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
-        const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, ro);
         const salt = E.keccak256(E.toUtf8Bytes("preview")); // address depends on salt; show shape only for a fixed one
-        const predicted = await pad.predictAddress(currentVariant, userAddress, salt);
+        const { predicted, gas, costWei } = await roTry(String(currentChainId), async (p) => {
+          const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, p);
+          const predicted = await pad.predictAddress(currentVariant, userAddress, salt);
+          const params = buildParams(f);
+          const data = pad.interface.encodeFunctionData("launch", [currentVariant, salt, params, buildInitCalls(f)]);
+          const [gas, feeData] = await Promise.all([
+            p.estimateGas({ from: userAddress, to: conf.launchpad, data }),
+            p.getFeeData(),
+          ]);
+          return { predicted, gas, costWei: gas * (feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n) };
+        });
         pAddr.textContent = `${predicted.slice(0, 8)}… (final address depends on launch salt)`;
-        const params = buildParams(f);
-        const data = pad.interface.encodeFunctionData("launch", [currentVariant, salt, params, buildInitCalls(f)]);
-        const [gas, feeData] = await Promise.all([
-          ro.estimateGas({ from: userAddress, to: conf.launchpad, data }),
-          ro.getFeeData(),
-        ]);
-        const costWei = gas * (feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n);
         pGas.textContent = `~${parseFloat(E.formatEther(costWei)).toFixed(6)} ETH (${gas} gas)`;
       } catch {
         pAddr.textContent = "preview unavailable";
@@ -745,27 +766,27 @@
       successCard.style.display = "none";
       try {
         const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, signer);
-        // read-only calls go through the public RPC: wallet-embedded nodes are flaky for eth_call
-        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
-        const roPad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, ro);
+        // read-only calls go through public RPCs with failover: wallet-embedded nodes are flaky for eth_call
+        const chainKey = String(currentChainId);
         const params = buildParams(f);
         const initCalls = buildInitCalls(f);
         const salt = makeSalt(f);
-        const fee = await roPad.fee();
+        const fee = await roTry(chainKey, (p) => new E.Contract(conf.launchpad, LAUNCHPAD_ABI, p).fee());
 
         // dry-run first: catches encoding/param errors before any gas is spent
         showToast("info", "Simulating transaction…");
         launchBtn.textContent = "Simulating…";
-        const predictedToken = await roPad.launch.staticCall(currentVariant, salt, params, initCalls, { value: fee, from: userAddress });
+        const predictedToken = await roTry(chainKey, (p) =>
+          new E.Contract(conf.launchpad, LAUNCHPAD_ABI, p).launch.staticCall(currentVariant, salt, params, initCalls, { value: fee, from: userAddress }));
 
-        // estimate gas on the public RPC and hand the wallet a ready limit —
+        // estimate gas on a public RPC and hand the wallet a ready limit —
         // MetaMask's own Base node often fails estimation ("could not coalesce error")
-        const gasLimit = await ro.estimateGas({
+        const gasLimit = await roTry(chainKey, (p) => p.estimateGas({
           from: userAddress,
           to: conf.launchpad,
           value: fee,
           data: pad.interface.encodeFunctionData("launch", [currentVariant, salt, params, initCalls]),
-        });
+        }));
 
         showToast("info", "Confirm the transaction in your wallet…");
         launchBtn.textContent = "Confirm in wallet…";
@@ -832,9 +853,10 @@
         const t = mine[i], conf = NETWORKS[t.chainId];
         if (!conf) continue;
         try {
-          const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
-          const c = new E.Contract(t.address, TOKEN_ABI, ro);
-          const [supply, dec] = await Promise.all([c.totalSupply(), c.decimals()]);
+          const [supply, dec] = await roTry(t.chainId, (p) => {
+            const c = new E.Contract(t.address, TOKEN_ABI, p);
+            return Promise.all([c.totalSupply(), c.decimals()]);
+          });
           const el = $(`supply-${i}`);
           if (el) el.textContent = `${Number(E.formatUnits(supply, dec)).toLocaleString()} ${t.symbol}`;
         } catch { const el = $(`supply-${i}`); if (el) el.textContent = ""; }
