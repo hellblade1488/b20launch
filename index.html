@@ -176,7 +176,7 @@
 
       <div class="variant-tabs">
         <button type="button" class="active" id="tab-asset">ASSET</button>
-        <button type="button" id="tab-stablecoin" disabled>STABLECOIN <span class="soon">coming soon</span></button>
+        <button type="button" id="tab-stablecoin">STABLECOIN</button>
       </div>
 
       <div class="input-grid">
@@ -193,9 +193,14 @@
       </div>
 
       <div class="input-grid">
-        <div class="input-row">
+        <div class="input-row" id="row-decimals">
           <label for="f-decimals">Decimals</label>
           <select id="f-decimals"></select>
+        </div>
+        <div class="input-row" id="row-currency" style="display: none;">
+          <label for="f-currency">Currency code <span class="hint">— ISO 4217, e.g. USD; decimals fixed at 6</span></label>
+          <input type="text" id="f-currency" placeholder="USD" maxlength="3" autocomplete="off" style="text-transform: uppercase;" />
+          <div class="field-error" id="e-currency"></div>
         </div>
         <div class="input-row">
           <label for="f-cap">Supply cap <span class="hint">— leave empty for no cap</span></label>
@@ -225,6 +230,10 @@
         <input type="checkbox" id="c-pause-role" />
         <label for="c-pause-role">Grant <b>PAUSE_ROLE</b> + <b>UNPAUSE_ROLE</b> to admin
           <span class="sub">lets the admin freeze all transfers in an emergency</span></label>
+      </div>
+
+      <div class="toast info" id="stable-note" style="display: none; margin: 0 0 1rem;">
+        A B20 stablecoin carries a self-declared currency code. It does not make your token backed, pegged or regulated — you are responsible for any claims made to holders.
       </div>
 
       <div class="preview-box" id="preview-box">
@@ -286,6 +295,7 @@
     const FACTORY_ADDR = "0xB20f000000000000000000000000000000000000";
     const REGISTRY_ADDR = "0x8453000000000000000000000000000000000001";
     const FEATURE_ASSET = E.keccak256(E.toUtf8Bytes("base.b20_asset"));
+    const FEATURE_STABLECOIN = E.keccak256(E.toUtf8Bytes("base.b20_stablecoin"));
 
     const REGISTRY_ABI = ["function isActivated(bytes32 feature) view returns (bool)"];
     const LAUNCHPAD_ABI = [
@@ -326,14 +336,20 @@
         [{ version: 1, name, symbol, initialAdmin, decimals }]
       );
     }
+    function encodeStablecoinCreateParams(name, symbol, initialAdmin, currency) {
+      return coder.encode(
+        ["tuple(uint8 version, string name, string symbol, address initialAdmin, string currency)"],
+        [{ version: 1, name, symbol, initialAdmin, currency }]
+      );
+    }
     const IB20 = new E.Interface([
       "function grantRole(bytes32 role, address account)",
       "function updateSupplyCap(uint256 newSupplyCap)",
-      "function batchMint(address[] recipients, uint256[] amounts)",
+      "function mint(address to, uint256 amount)",
     ]);
     const encodeGrantRole = (role, account) => IB20.encodeFunctionData("grantRole", [role, account]);
     const encodeUpdateSupplyCap = (cap) => IB20.encodeFunctionData("updateSupplyCap", [cap]);
-    const encodeBatchMint = (recipients, amounts) => IB20.encodeFunctionData("batchMint", [recipients, amounts]);
+    const encodeMint = (to, amount) => IB20.encodeFunctionData("mint", [to, amount]);
 
     const MAX_SUPPLY_CAP = (1n << 128n) - 1n; // uint128.max
 
@@ -348,6 +364,7 @@
     /* ========== state ========== */
     let provider = null, signer = null, userAddress = null, currentChainId = null;
     let launching = false;
+    let currentVariant = 0; // 0 = ASSET, 1 = STABLECOIN
 
     const DISCONNECTED_KEY = "b20launch_disconnected";
     const TOKENS_KEY = "b20launch_tokens";
@@ -474,7 +491,12 @@
       try {
         const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
         const registry = new E.Contract(REGISTRY_ADDR, REGISTRY_ABI, ro);
-        const active = await registry.isActivated(FEATURE_ASSET);
+        const [activeAsset, activeStable] = await Promise.all([
+          registry.isActivated(FEATURE_ASSET),
+          registry.isActivated(FEATURE_STABLECOIN),
+        ]);
+        $("tab-stablecoin").disabled = !activeStable;
+        const active = activeAsset;
         if (!active) {
           bannerArea.innerHTML = `<div class="warn-banner"><span>B20 is not activated on ${conf.name} yet. Check back soon.</span></div>`;
           launchBtn.disabled = true;
@@ -512,12 +534,16 @@
     function readForm() {
       const name = $("f-name").value.trim();
       const symbol = $("f-symbol").value.trim().toUpperCase();
-      const decimals = Number($("f-decimals").value);
+      const decimals = currentVariant === 1 ? 6 : Number($("f-decimals").value);
+      const currency = $("f-currency").value.trim().toUpperCase();
       const adminRaw = $("f-admin").value.trim();
       let ok = true;
 
       ok = setFieldError($("f-name"), $("e-name"), name ? "" : "Name is required") && ok;
       ok = setFieldError($("f-symbol"), $("e-symbol"), symbol ? "" : "Symbol is required") && ok;
+      if (currentVariant === 1) {
+        ok = setFieldError($("f-currency"), $("e-currency"), /^[A-Z]{3}$/.test(currency) ? "" : "3 uppercase letters, e.g. USD") && ok;
+      }
 
       let admin = null;
       if (!adminRaw) { ok = setFieldError($("f-admin"), $("e-admin"), "Admin address is required") && ok; }
@@ -540,7 +566,13 @@
         else setFieldError($("f-mint"), $("e-mint"), "");
       } catch { ok = setFieldError($("f-mint"), $("e-mint"), "Not a valid number") && ok; }
 
-      return { ok, name, symbol, decimals, admin, cap, mint };
+      return { ok, name, symbol, decimals, currency, admin, cap, mint };
+    }
+
+    function buildParams(f) {
+      return currentVariant === 1
+        ? encodeStablecoinCreateParams(f.name, f.symbol, f.admin, f.currency)
+        : encodeAssetCreateParams(f.name, f.symbol, f.admin, f.decimals);
     }
 
     function buildInitCalls(f) {
@@ -552,7 +584,7 @@
         calls.push(encodeGrantRole(ROLES.UNPAUSE_ROLE, f.admin));
       }
       if (f.cap !== null) calls.push(encodeUpdateSupplyCap(f.cap));
-      if (f.mint !== null && f.mint > 0n && f.admin) calls.push(encodeBatchMint([f.admin], [f.mint]));
+      if (f.mint !== null && f.mint > 0n && f.admin) calls.push(encodeMint(f.admin, f.mint));
       return calls;
     }
 
@@ -573,10 +605,10 @@
         const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
         const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, ro);
         const salt = E.keccak256(E.toUtf8Bytes("preview")); // address depends on salt; show shape only for a fixed one
-        const predicted = await pad.predictAddress(0, userAddress, salt);
+        const predicted = await pad.predictAddress(currentVariant, userAddress, salt);
         pAddr.textContent = `${predicted.slice(0, 8)}… (final address depends on launch salt)`;
-        const params = encodeAssetCreateParams(f.name, f.symbol, f.admin, f.decimals);
-        const data = pad.interface.encodeFunctionData("launch", [0, salt, params, buildInitCalls(f)]);
+        const params = buildParams(f);
+        const data = pad.interface.encodeFunctionData("launch", [currentVariant, salt, params, buildInitCalls(f)]);
         const [gas, feeData] = await Promise.all([
           ro.estimateGas({ from: userAddress, to: conf.launchpad, data }),
           ro.getFeeData(),
@@ -602,7 +634,7 @@
       successCard.style.display = "none";
       try {
         const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, signer);
-        const params = encodeAssetCreateParams(f.name, f.symbol, f.admin, f.decimals);
+        const params = buildParams(f);
         const initCalls = buildInitCalls(f);
         const salt = makeSalt(f);
         const fee = await pad.fee();
@@ -610,11 +642,11 @@
         // dry-run first: catches encoding/param errors before any gas is spent
         showToast("info", "Simulating transaction…");
         launchBtn.textContent = "Simulating…";
-        const predictedToken = await pad.launch.staticCall(0, salt, params, initCalls, { value: fee });
+        const predictedToken = await pad.launch.staticCall(currentVariant, salt, params, initCalls, { value: fee });
 
         showToast("info", "Confirm the transaction in your wallet…");
         launchBtn.textContent = "Confirm in wallet…";
-        const tx = await pad.launch(0, salt, params, initCalls, { value: fee });
+        const tx = await pad.launch(currentVariant, salt, params, initCalls, { value: fee });
 
         showToast("info", `Waiting for confirmation… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
         launchBtn.textContent = "Waiting for confirmation…";
@@ -655,7 +687,7 @@
     function loadSaved() { try { return JSON.parse(localStorage.getItem(TOKENS_KEY) || "[]"); } catch { return []; } }
     function saveToken(token, f, conf) {
       const list = loadSaved();
-      list.unshift({ address: token, name: f.name, symbol: f.symbol, chainId: String(currentChainId), owner: userAddress, ts: Date.now() });
+      list.unshift({ address: token, name: f.name, symbol: f.symbol, variant: currentVariant, chainId: String(currentChainId), owner: userAddress, ts: Date.now() });
       try { localStorage.setItem(TOKENS_KEY, JSON.stringify(list.slice(0, 100))); } catch {}
     }
 
@@ -696,8 +728,21 @@
       }
       sel.value = "18";
 
+      const tabAsset = $("tab-asset"), tabStable = $("tab-stablecoin");
+      function setVariant(v) {
+        currentVariant = v;
+        tabAsset.classList.toggle("active", v === 0);
+        tabStable.classList.toggle("active", v === 1);
+        $("row-decimals").style.display = v === 0 ? "" : "none";
+        $("row-currency").style.display = v === 1 ? "" : "none";
+        $("stable-note").style.display = v === 1 ? "" : "none";
+        refreshPreview();
+      }
+      tabAsset.addEventListener("click", () => setVariant(0));
+      tabStable.addEventListener("click", () => setVariant(1));
+
       launchBtn.addEventListener("click", launch);
-      ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin"].forEach((id) => $(id).addEventListener("input", refreshPreview));
+      ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin", "f-currency"].forEach((id) => $(id).addEventListener("input", refreshPreview));
       ["c-mint-role", "c-pause-role"].forEach((id) => $(id).addEventListener("change", refreshPreview));
 
       $("s-copy").addEventListener("click", async () => {
