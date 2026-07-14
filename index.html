@@ -223,18 +223,24 @@
         <div class="field-error" id="e-mint"></div>
       </div>
 
-      <div class="input-row">
+      <div class="checkbox-row">
+        <input type="checkbox" id="c-renounce" checked />
+        <label for="c-renounce">Fixed supply — <b>no admin</b>
+          <span class="sub">the token is born ownerless: nobody, including you, can ever mint more, pause transfers or change anything. Requires an initial supply.</span></label>
+      </div>
+
+      <div class="input-row" id="row-admin" style="display: none;">
         <label for="f-admin">Admin address <span class="hint">— full control of the token; defaults to your wallet</span></label>
         <input type="text" id="f-admin" class="mono" placeholder="0x…" autocomplete="off" spellcheck="false" />
         <div class="field-error" id="e-admin"></div>
       </div>
 
-      <div class="checkbox-row">
+      <div class="checkbox-row" id="row-mint-role" style="display: none;">
         <input type="checkbox" id="c-mint-role" />
         <label for="c-mint-role">Grant <b>MINT_ROLE</b> to admin
           <span class="sub">lets the admin mint more tokens later; the initial supply is minted either way</span></label>
       </div>
-      <div class="checkbox-row">
+      <div class="checkbox-row" id="row-pause-role" style="display: none;">
         <input type="checkbox" id="c-pause-role" />
         <label for="c-pause-role">Grant <b>PAUSE_ROLE</b> + <b>UNPAUSE_ROLE</b> to admin
           <span class="sub">lets the admin freeze all transfers in an emergency</span></label>
@@ -676,8 +682,12 @@
         ok = setFieldError($("f-currency"), $("e-currency"), /^[A-Z]{3}$/.test(currency) ? "" : "3 uppercase letters, e.g. USD") && ok;
       }
 
+      const renounced = $("c-renounce").checked;
       let admin = null;
-      if (!adminRaw) { ok = setFieldError($("f-admin"), $("e-admin"), "Admin address is required") && ok; }
+      if (renounced) {
+        admin = "0x0000000000000000000000000000000000000000"; // admin-less: factory grants no roles to anyone
+        setFieldError($("f-admin"), $("e-admin"), "");
+      } else if (!adminRaw) { ok = setFieldError($("f-admin"), $("e-admin"), "Admin address is required") && ok; }
       else if (!E.isAddress(adminRaw)) { ok = setFieldError($("f-admin"), $("e-admin"), "Not a valid address") && ok; }
       else { admin = E.getAddress(adminRaw); setFieldError($("f-admin"), $("e-admin"), ""); }
 
@@ -694,10 +704,11 @@
         mint = parseAmount($("f-mint").value, decimals);
         if (mint !== null && mint > MAX_SUPPLY_CAP) { ok = setFieldError($("f-mint"), $("e-mint"), "Exceeds uint128 max") && ok; }
         else if (mint !== null && cap !== null && mint > cap) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply exceeds the cap") && ok; }
+        else if (renounced && (mint === null || mint === 0n)) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply is required for a no-admin token — nobody can mint it later") && ok; }
         else setFieldError($("f-mint"), $("e-mint"), "");
       } catch { ok = setFieldError($("f-mint"), $("e-mint"), "Not a valid number") && ok; }
 
-      return { ok, name, symbol, decimals, currency, admin, cap, mint };
+      return { ok, name, symbol, decimals, currency, admin, cap, mint, renounced };
     }
 
     function buildParams(f) {
@@ -708,13 +719,16 @@
 
     function buildInitCalls(f) {
       const calls = [];
-      if ($("c-mint-role").checked && f.admin) calls.push(encodeGrantRole(ROLES.MINT_ROLE, f.admin));
-      if ($("c-pause-role").checked && f.admin) {
-        calls.push(encodeGrantRole(ROLES.PAUSE_ROLE, f.admin));
-        calls.push(encodeGrantRole(ROLES.UNPAUSE_ROLE, f.admin));
+      if (!f.renounced) {
+        if ($("c-mint-role").checked && f.admin) calls.push(encodeGrantRole(ROLES.MINT_ROLE, f.admin));
+        if ($("c-pause-role").checked && f.admin) {
+          calls.push(encodeGrantRole(ROLES.PAUSE_ROLE, f.admin));
+          calls.push(encodeGrantRole(ROLES.UNPAUSE_ROLE, f.admin));
+        }
       }
       if (f.cap !== null) calls.push(encodeUpdateSupplyCap(f.cap));
-      if (f.mint !== null && f.mint > 0n && f.admin) calls.push(encodeMint(f.admin, f.mint));
+      const mintTo = f.renounced ? userAddress : f.admin; // no admin exists — mint the supply to the creator
+      if (f.mint !== null && f.mint > 0n && mintTo) calls.push(encodeMint(mintTo, f.mint));
       return calls;
     }
 
@@ -884,6 +898,14 @@
       }
       tabAsset.addEventListener("click", () => setVariant(0));
       tabStable.addEventListener("click", () => setVariant(1));
+
+      $("c-renounce").addEventListener("change", () => {
+        const off = $("c-renounce").checked;
+        $("row-admin").style.display = off ? "none" : "";
+        $("row-mint-role").style.display = off ? "none" : "";
+        $("row-pause-role").style.display = off ? "none" : "";
+        refreshPreview();
+      });
 
       launchBtn.addEventListener("click", launch);
       ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin", "f-currency"].forEach((id) => $(id).addEventListener("input", refreshPreview));
