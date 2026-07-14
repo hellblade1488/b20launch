@@ -129,6 +129,16 @@
     .token-item .t-supply { font-size: 0.8rem; color: var(--base-blue-light); white-space: nowrap; }
     .empty { color: var(--text-dim); text-align: center; padding: 1.5rem 0; }
 
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+    .modal-overlay.open { display: flex; }
+    .wallet-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; width: 100%; max-width: 360px; }
+    .wallet-modal h3 { font-size: 1rem; margin-bottom: 1rem; }
+    .wallet-option { display: flex; align-items: center; gap: 0.75rem; width: 100%; background: var(--bg-2); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.6rem; font-size: 0.95rem; }
+    .wallet-option:hover:not(:disabled) { background: var(--surface-2); border-color: var(--base-blue); }
+    .wallet-option img { width: 24px; height: 24px; border-radius: 6px; }
+    .wallet-cancel { width: 100%; background: transparent; border: 1px solid var(--border); color: var(--text-dim); border-radius: 10px; padding: 0.6rem; }
+    .wallet-cancel:hover:not(:disabled) { background: var(--surface-2); }
+
     footer { border-top: 1px solid var(--border); padding: 2rem 1.5rem; text-align: center; color: var(--text-dim); font-size: 0.85rem; }
     footer a { color: var(--text-dim); margin: 0 0.5rem; }
 
@@ -262,6 +272,14 @@
       </div>
     </div>
   </main>
+
+  <div class="modal-overlay" id="wallet-modal">
+    <div class="wallet-modal">
+      <h3>Connect a wallet</h3>
+      <div id="wallet-options"></div>
+      <button class="wallet-cancel" id="wallet-cancel" type="button">Cancel</button>
+    </div>
+  </div>
 
   <footer>
     <div>
@@ -418,13 +436,80 @@
       $("connect-btn").addEventListener("click", () => connectWallet(false));
     }
 
+    /* EIP-6963: discover every installed wallet so the user can pick one */
+    const discovered = new Map(); // rdns -> announcement {info, provider}
+    let injected = null;          // active EIP-1193 provider
+    const boundProviders = new WeakSet();
+    const LAST_WALLET_KEY = "b20launch_last_wallet";
+    window.addEventListener("eip6963:announceProvider", (e) => {
+      discovered.set(e.detail.info.rdns, e.detail);
+      if ($("wallet-modal").classList.contains("open")) renderWalletOptions();
+    });
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+    function showTopError(html) {
+      bannerArea.innerHTML = `<div class="warn-banner"><span>${html}</span></div>`;
+    }
+
+    let modalResolve = null;
+    function renderWalletOptions() {
+      const box = $("wallet-options");
+      box.innerHTML = "";
+      for (const d of discovered.values()) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "wallet-option";
+        const img = document.createElement("img"); img.src = d.info.icon; img.alt = "";
+        const span = document.createElement("span"); span.textContent = d.info.name;
+        b.append(img, span);
+        b.addEventListener("click", () => closeWalletModal(d));
+        box.appendChild(b);
+      }
+    }
+    function openWalletModal() {
+      return new Promise((resolve) => {
+        modalResolve = resolve;
+        renderWalletOptions();
+        $("wallet-modal").classList.add("open");
+      });
+    }
+    function closeWalletModal(result) {
+      $("wallet-modal").classList.remove("open");
+      if (modalResolve) { modalResolve(result || null); modalResolve = null; }
+    }
+
+    async function pickProvider(silent) {
+      if (discovered.size === 0) return window.ethereum ? { provider: window.ethereum, info: null } : null;
+      if (discovered.size === 1) return discovered.values().next().value;
+      if (silent) {
+        let last = null;
+        try { last = localStorage.getItem(LAST_WALLET_KEY); } catch {}
+        return (last && discovered.get(last)) || null;
+      }
+      return openWalletModal();
+    }
+
+    function bindProviderEvents(p) {
+      if (!p?.on || boundProviders.has(p)) return;
+      boundProviders.add(p);
+      p.on("accountsChanged", (acc) => {
+        if (p !== injected) return;
+        if (!acc.length) { disconnectWallet(); return; }
+        connectWallet(true);
+      });
+      p.on("chainChanged", () => { if (p === injected) connectWallet(true); });
+    }
+
     async function connectWallet(silent) {
-      if (!window.ethereum) {
-        if (!silent) showToast("error", "No wallet found. Install MetaMask, Rabby or Coinbase Wallet.");
+      const choice = silent && injected ? { provider: injected, info: null } : await pickProvider(silent);
+      if (!choice) {
+        if (!silent) showTopError("No wallet found. Install MetaMask, Rabby or Coinbase Wallet and reload the page.");
         return;
       }
+      injected = choice.provider;
+      if (choice.info) { try { localStorage.setItem(LAST_WALLET_KEY, choice.info.rdns); } catch {} }
+      bindProviderEvents(injected);
       try {
-        provider = new E.BrowserProvider(window.ethereum);
+        provider = new E.BrowserProvider(injected);
         const accounts = silent
           ? await provider.send("eth_accounts", [])
           : await provider.send("eth_requestAccounts", []);
@@ -436,28 +521,37 @@
         currentChainId = Number(net.chainId);
         onWalletChanged();
       } catch (e) {
-        if (!silent) showToast("error", escapeHtml(decodeError(e)));
+        if (silent) return;
+        const code = e?.error?.code ?? e?.code;
+        if (code === -32002) {
+          showTopError("A connection request is already open — find your wallet window and approve it there.");
+        } else if (code === 4001 || e?.code === "ACTION_REJECTED") {
+          showTopError("Connection request was rejected in the wallet. Click Connect Wallet to try again.");
+        } else {
+          showTopError(escapeHtml(decodeError(e)));
+        }
       }
     }
 
     function disconnectWallet() {
       setManuallyDisconnected(true);
-      provider = signer = userAddress = currentChainId = null;
+      provider = signer = userAddress = currentChainId = injected = null;
       renderDisconnected();
       onWalletChanged();
     }
 
     async function switchNetwork() {
+      if (!injected) return;
       // from a supported network the pill toggles to the other one; from anywhere else — to the default
       const target = String(currentChainId) === "8453" ? "84532"
         : String(currentChainId) === "84532" ? "8453"
         : DEFAULT_CHAIN;
       const conf = NETWORKS[target];
       try {
-        await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: conf.chainHex }] });
+        await injected.request({ method: "wallet_switchEthereumChain", params: [{ chainId: conf.chainHex }] });
       } catch (err) {
         if (err.code === 4902) {
-          await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+          await injected.request({ method: "wallet_addEthereumChain", params: [{
             chainId: conf.chainHex, chainName: conf.name,
             nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
             rpcUrls: [conf.rpc], blockExplorerUrls: [conf.scan],
@@ -763,15 +857,11 @@
         try { await navigator.clipboard.writeText($("s-addr").textContent); $("s-copy").textContent = "Copied ✓"; setTimeout(() => ($("s-copy").textContent = "Copy address"), 1500); } catch {}
       });
 
-      if (window.ethereum) {
-        window.ethereum.on?.("accountsChanged", (acc) => {
-          if (!acc.length) { disconnectWallet(); return; }
-          userAddress = E.getAddress(acc[0]);
-          connectWallet(true);
-        });
-        window.ethereum.on?.("chainChanged", () => connectWallet(true));
-        if (!isManuallyDisconnected()) connectWallet(true);
-      }
+      renderDisconnected(); // wire up the initial Connect button before anything else
+      $("wallet-cancel").addEventListener("click", () => closeWalletModal(null));
+      $("wallet-modal").addEventListener("click", (e) => { if (e.target === $("wallet-modal")) closeWalletModal(null); });
+      // small delay so EIP-6963 wallets have announced themselves before auto-reconnect
+      if (!isManuallyDisconnected()) setTimeout(() => connectWallet(true), 300);
       renderTokens();
     }
     init();
