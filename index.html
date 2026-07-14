@@ -170,7 +170,7 @@
 
     <!-- Create form -->
     <div class="card" id="create-card">
-      <h2>Create your B20 token <span class="badge testnet" id="net-badge">Base Sepolia</span></h2>
+      <h2>Create your B20 token <span class="badge" id="net-badge">Base Mainnet</span></h2>
 
       <div class="variant-tabs">
         <button type="button" class="active" id="tab-asset">ASSET</button>
@@ -283,7 +283,7 @@
         chainHex: "0x2105",
         rpc: "https://mainnet.base.org",
         scan: "https://basescan.org",
-        launchpad: "", // B20LaunchPad mainnet — pending deploy
+        launchpad: "0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71", // B20LaunchPad, deployed 2026-07-14
         badge: "Base Mainnet", badgeClass: "",
       },
       "84532": {
@@ -295,7 +295,7 @@
         badge: "Base Sepolia", badgeClass: "testnet",
       },
     };
-    const DEFAULT_CHAIN = "84532";
+    const DEFAULT_CHAIN = "8453";
 
     const FACTORY_ADDR = "0xB20f000000000000000000000000000000000000";
     const REGISTRY_ADDR = "0x8453000000000000000000000000000000000001";
