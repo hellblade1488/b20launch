@@ -419,6 +419,9 @@
       }
       if (err?.code === "ACTION_REJECTED" || err?.code === 4001) return "Transaction rejected in wallet.";
       if (err?.code === "INSUFFICIENT_FUNDS") return "Not enough ETH for gas on this network.";
+      if (/missing revert data|failed to fetch|network error|timeout/i.test(err?.message || "")) {
+        return "The RPC node glitched during simulation — wait a few seconds and click Launch again.";
+      }
       return err?.shortMessage || err?.message || "Unknown error";
     }
 
@@ -742,15 +745,18 @@
       successCard.style.display = "none";
       try {
         const pad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, signer);
+        // read-only calls go through the public RPC: wallet-embedded nodes are flaky for eth_call
+        const ro = new E.JsonRpcProvider(conf.rpc, undefined, { staticNetwork: true });
+        const roPad = new E.Contract(conf.launchpad, LAUNCHPAD_ABI, ro);
         const params = buildParams(f);
         const initCalls = buildInitCalls(f);
         const salt = makeSalt(f);
-        const fee = await pad.fee();
+        const fee = await roPad.fee();
 
         // dry-run first: catches encoding/param errors before any gas is spent
         showToast("info", "Simulating transaction…");
         launchBtn.textContent = "Simulating…";
-        const predictedToken = await pad.launch.staticCall(currentVariant, salt, params, initCalls, { value: fee });
+        const predictedToken = await roPad.launch.staticCall(currentVariant, salt, params, initCalls, { value: fee, from: userAddress });
 
         showToast("info", "Confirm the transaction in your wallet…");
         launchBtn.textContent = "Confirm in wallet…";
