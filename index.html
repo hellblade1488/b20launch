@@ -93,6 +93,8 @@
     .mono { font-family: var(--font-mono); }
     .mini-btn { background: var(--paper); color: var(--ink); border: 1px solid var(--ink); border-radius: var(--radius-btn); font-family: var(--font-sys); font-size: 12px; font-weight: 700; padding: 4px 10px; }
     .mini-btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+    .preset-row { display: flex; gap: 5px; margin-bottom: 16px; }
+    .preset-row .mini-btn { flex: 1; padding: 8px 10px; font-family: var(--font-mono); font-weight: 400; }
 
     .variant-tabs { display: flex; gap: 5px; margin-bottom: 22px; }
     .variant-tabs button { flex: 1; background: var(--paper); border: 1px solid var(--ink); color: var(--ink); border-radius: var(--radius-btn); padding: 10px; font-family: var(--font-sys); font-size: 14px; font-weight: 700; }
@@ -343,6 +345,25 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="tip-modal">
+    <div class="wallet-modal">
+      <h3>Tip the builder</h3>
+      <div class="variant-tabs">
+        <button type="button" class="active" id="tip-tab-eth">ETH</button>
+        <button type="button" id="tip-tab-usdc">USDC</button>
+      </div>
+      <div class="preset-row" id="tip-presets"></div>
+      <div class="input-row">
+        <label for="tip-amount">Amount <span class="hint" id="tip-unit">— ETH on Base</span></label>
+        <input type="text" id="tip-amount" placeholder="0.005" inputmode="decimal" autocomplete="off" />
+        <div class="field-error" id="e-tip"></div>
+      </div>
+      <button class="send-btn" id="tip-send" disabled>Connect wallet to tip</button>
+      <div id="tip-result"></div>
+      <button class="wallet-cancel" id="tip-close" type="button" style="margin-top: 10px;">Close</button>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="wallet-modal">
     <div class="wallet-modal">
       <h3>Connect a wallet</h3>
@@ -355,7 +376,8 @@
     <div>
       <a href="https://github.com/hellblade1488/b20launch" target="_blank" rel="noopener">GitHub</a> ·
       <a href="https://docs.base.org/get-started/launch-b20-token" target="_blank" rel="noopener">What is B20?</a> ·
-      <a href="https://basescan.org/address/0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71#code" id="footer-contract" target="_blank" rel="noopener">Launcher contract</a>
+      <a href="https://basescan.org/address/0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71#code" id="footer-contract" target="_blank" rel="noopener">Launcher contract</a> ·
+      <a href="#" id="open-tip">Tip the builder</a>
     </div>
     <div style="margin-top: 0.5rem;">Built on Base by <a href="https://github.com/hellblade1488" target="_blank" rel="noopener">hellblade1488</a> · Owner: <a href="https://x.com/35nine" target="_blank" rel="noopener">X</a> · MIT</div>
   </footer>
@@ -371,6 +393,7 @@
         chainHex: "0x2105",
         rpc: "https://mainnet.base.org",
         rpcs: ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"],
+        usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         scan: "https://basescan.org",
         launchpad: "0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71", // B20LaunchPad, deployed 2026-07-14
         airdrop: "", // B20Airdrop — pending deploy
@@ -381,6 +404,7 @@
         chainHex: "0x14a34",
         rpc: "https://sepolia.base.org",
         rpcs: ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com"],
+        usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
         scan: "https://sepolia.basescan.org",
         launchpad: "0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90", // B20LaunchPad, deployed 2026-07-14
         airdrop: "", // B20Airdrop — pending deploy
@@ -461,6 +485,7 @@
       "function balanceOf(address) view returns (uint256)",
       "function allowance(address owner, address spender) view returns (uint256)",
       "function approve(address spender, uint256 amount) returns (bool)",
+      "function transfer(address to, uint256 amount) returns (bool)",
     ];
     const AIRDROP_ABI = [
       "function disperse(address token, address[] recipients, uint256[] amounts)",
@@ -1290,6 +1315,75 @@
       }
     }
 
+    /* ========== tips ========== */
+    const TIP_RECIPIENT = "0xF4130Ba14C14BdEdA491d271dd3b58585d058C70";
+    const TIP_PRESETS = { ETH: ["0.001", "0.005", "0.01"], USDC: ["1", "5", "20"] };
+    let tipCurrency = "ETH";
+    let tipBusy = false;
+
+    const showTipToast = (kind, html) => { $("tip-result").innerHTML = `<div class="toast ${kind}">${html}</div>`; };
+
+    function renderTipPresets() {
+      $("tip-presets").innerHTML = TIP_PRESETS[tipCurrency].map((v) => `<button type="button" class="mini-btn" data-v="${v}">${v} ${tipCurrency}</button>`).join("");
+      $("tip-presets").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { $("tip-amount").value = b.dataset.v; }));
+    }
+    function setTipCurrency(c) {
+      tipCurrency = c;
+      $("tip-tab-eth").classList.toggle("active", c === "ETH");
+      $("tip-tab-usdc").classList.toggle("active", c === "USDC");
+      $("tip-unit").textContent = `— ${c} on Base`;
+      $("tip-amount").placeholder = c === "ETH" ? "0.005" : "5";
+      renderTipPresets();
+    }
+    function updateTipButton() {
+      const btn = $("tip-send");
+      if (!userAddress || !netConf()) { btn.disabled = true; btn.textContent = "Connect wallet to tip"; return; }
+      btn.disabled = false; btn.textContent = "Send tip";
+    }
+
+    async function sendTip() {
+      if (tipBusy) return;
+      const conf = netConf();
+      if (!signer || !conf) return;
+      const chainKey = String(currentChainId);
+      const decimals = tipCurrency === "ETH" ? 18 : 6;
+      let amount = null;
+      try { amount = parseAmount($("tip-amount").value, decimals); } catch {}
+      if (amount === null || amount === 0n) { setFieldError($("tip-amount"), $("e-tip"), "Enter an amount"); return; }
+      setFieldError($("tip-amount"), $("e-tip"), "");
+      tipBusy = true;
+      const btn = $("tip-send");
+      btn.disabled = true;
+      btn.textContent = "Confirm in wallet…";
+      try {
+        let tx;
+        if (tipCurrency === "ETH") {
+          const gas = await roTry(chainKey, (p) => p.estimateGas({ from: userAddress, to: TIP_RECIPIENT, value: amount }));
+          tx = await signer.sendTransaction({ to: TIP_RECIPIENT, value: amount, gasLimit: (gas * 130n) / 100n });
+        } else {
+          if (!conf.usdc) { showTipToast("error", "USDC is not available on this network."); return; }
+          const bal = await roTry(chainKey, (p) => new E.Contract(conf.usdc, TOKEN_ABI, p).balanceOf(userAddress));
+          if (bal < amount) { showTipToast("error", "Not enough USDC on this network."); return; }
+          const usdc = new E.Contract(conf.usdc, TOKEN_ABI, signer);
+          const gas = await roTry(chainKey, (p) => p.estimateGas({ from: userAddress, to: conf.usdc, data: usdc.interface.encodeFunctionData("transfer", [TIP_RECIPIENT, amount]) }));
+          tx = await usdc.transfer(TIP_RECIPIENT, amount, { gasLimit: (gas * 130n) / 100n });
+        }
+        showTipToast("info", `Waiting for confirmation… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
+        btn.textContent = "Waiting…";
+        let r = null;
+        try { r = await tx.wait(); } catch {}
+        if (!r) r = await waitForReceipt(chainKey, tx.hash);
+        if (r && r.status === 1) showTipToast("success", "Thank you for supporting the project.");
+        else if (!r) showTipToast("info", `Tip sent — confirm on <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">BaseScan</a>.`);
+        else showTipToast("error", "Transaction reverted.");
+      } catch (e) {
+        showTipToast("error", escapeHtml(decodeError(e)));
+      } finally {
+        tipBusy = false;
+        updateTipButton();
+      }
+    }
+
     /* ========== init ========== */
     function init() {
       const sel = $("f-decimals");
@@ -1324,6 +1418,14 @@
       launchBtn.addEventListener("click", launch);
       ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin", "f-currency"].forEach((id) => $(id).addEventListener("input", refreshPreview));
       ["c-mint-role", "c-pause-role"].forEach((id) => $(id).addEventListener("change", refreshPreview));
+
+      // tips
+      $("open-tip").addEventListener("click", (e) => { e.preventDefault(); $("tip-result").innerHTML = ""; renderTipPresets(); updateTipButton(); $("tip-modal").classList.add("open"); });
+      $("tip-close").addEventListener("click", () => $("tip-modal").classList.remove("open"));
+      $("tip-modal").addEventListener("click", (e) => { if (e.target === $("tip-modal") && !tipBusy) $("tip-modal").classList.remove("open"); });
+      $("tip-tab-eth").addEventListener("click", () => setTipCurrency("ETH"));
+      $("tip-tab-usdc").addEventListener("click", () => setTipCurrency("USDC"));
+      $("tip-send").addEventListener("click", sendTip);
 
       // airdrop
       $("airdrop-btn").addEventListener("click", () => { airdropAttached ? saveAttachedAirdrop() : runAirdrop(); });
