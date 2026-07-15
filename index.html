@@ -806,7 +806,7 @@
         mint = parseAmount($("f-mint").value, decimals);
         if (mint !== null && mint > MAX_SUPPLY_CAP) { ok = setFieldError($("f-mint"), $("e-mint"), "Exceeds uint128 max") && ok; }
         else if (mint !== null && cap !== null && mint > cap) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply exceeds the cap") && ok; }
-        else if (renounced && (mint === null || mint === 0n)) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply is required for a no-admin token — nobody can mint it later") && ok; }
+        else if (renounced && (mint === null || mint === 0n) && !($("c-airdrop").checked && pendingAirdrop)) { ok = setFieldError($("f-mint"), $("e-mint"), "Initial supply (or an airdrop list) is required for a no-admin token — nobody can mint later") && ok; }
         else setFieldError($("f-mint"), $("e-mint"), "");
       } catch { ok = setFieldError($("f-mint"), $("e-mint"), "Not a valid number") && ok; }
 
@@ -831,6 +831,7 @@
       if (f.cap !== null) calls.push(encodeUpdateSupplyCap(f.cap));
       const mintTo = f.renounced ? userAddress : f.admin; // no admin exists — mint the supply to the creator
       if (f.mint !== null && f.mint > 0n && mintTo) calls.push(encodeMint(mintTo, f.mint));
+      calls.push(...airdropMintCalls(f).calls); // in-creation airdrop: recipients are minted directly
       return calls;
     }
 
@@ -851,9 +852,14 @@
       if (f.ok) {
         const minted = f.mint !== null && f.mint > 0n
           ? `${Number(E.formatUnits(f.mint, f.decimals)).toLocaleString("en-US")} ${f.symbol || "tokens"} minted to your wallet`
-          : "0 minted — supply starts empty";
+          : "0 minted to you";
+        let airTxt = "";
+        try {
+          const a = airdropMintCalls(f);
+          if (a.calls.length) airTxt = ` + airdrop ${Number(E.formatUnits(a.total, f.decimals)).toLocaleString("en-US")} to ${a.calls.length} wallets`;
+        } catch { airTxt = " + airdrop (fix its settings)"; }
         const capTxt = f.cap !== null ? `cap ${Number(E.formatUnits(f.cap, f.decimals)).toLocaleString("en-US")} (ceiling, not minted)` : "no cap";
-        sum.textContent = `${minted} · ${capTxt}`;
+        sum.textContent = `${minted}${airTxt} · ${capTxt}`;
       } else { sum.textContent = "—"; }
       const conf = netConf();
       if (!userAddress || !conf || !conf.launchpad) return;
@@ -886,6 +892,12 @@
       if (!conf || !conf.launchpad || !signer) return;
       const f = readForm();
       if (!f.ok) { showToast("error", "Fix the highlighted fields first."); return; }
+      let airTotal = 0n;
+      try { airTotal = airdropMintCalls(f).total; } catch (e) { showToast("error", escapeHtml(e.message)); return; }
+      if (f.cap !== null && (f.mint ?? 0n) + airTotal > f.cap) {
+        showToast("error", "Initial supply plus the airdrop total exceeds the supply cap.");
+        return;
+      }
 
       launching = true;
       launchBtn.disabled = true;
@@ -946,14 +958,6 @@
         clearToast();
         showSuccess(token, f, conf);
         renderTokens();
-
-        // attached airdrop: run it now with the freshly created token
-        if ($("c-airdrop").checked && pendingAirdrop) {
-          $("a-token").value = token;
-          openAirdropModal(false);
-          showAirdropToast("info", "Token created — starting the airdrop…");
-          runAirdrop();
-        }
       } catch (e) {
         showToast("error", escapeHtml(decodeError(e)));
       } finally {
@@ -1049,7 +1053,7 @@
     function openAirdropModal(attached) {
       airdropAttached = attached;
       $("a-token-row").style.display = attached ? "none" : "";
-      $("airdrop-mode-note").textContent = attached ? "— for the token you are about to launch" : "";
+      $("airdrop-mode-note").textContent = attached ? "— minted inside the creation transaction, up to 150 wallets" : "";
       $("airdrop-result").innerHTML = "";
       $("airdrop-modal").classList.add("open");
       updateAirdropButton();
@@ -1154,7 +1158,7 @@
         $("a-p-total").textContent = airdropMode === "percent"
           ? `${pctSum.toFixed(2)}% of the total you set${pctSum > 100.000001 ? " — OVER 100%" : ""}`
           : rows.reduce((s, r) => s + parseFloat(r.value), 0).toLocaleString("en-US") + " tokens";
-        $("a-p-balance").textContent = "checked after launch";
+        $("a-p-balance").textContent = "recipients are minted at creation — no balance needed";
         $("a-p-issues-row").style.display = issues.length ? "" : "none";
         $("a-p-issues").textContent = issues.slice(0, 5).join("; ") + (issues.length > 5 ? ` … +${issues.length - 5} more` : "");
         return;
@@ -1193,11 +1197,34 @@
         if (total === null || total === 0n) { setFieldError($("a-total"), $("e-a-total"), "Total to distribute is required in % mode"); return; }
         setFieldError($("a-total"), $("e-a-total"), "");
       }
-      pendingAirdrop = { count: rows.length };
-      $("airdrop-sub").textContent = `${rows.length} recipients ready — the airdrop will start right after the launch confirms`;
+      if (rows.length > 150) { setFieldError($("a-list"), $("e-a-list"), `${rows.length} recipients — the in-creation airdrop supports up to 150. Split the list or airdrop the rest after launch.`); return; }
+      pendingAirdrop = { rows, mode: airdropMode, totalStr: $("a-total").value, count: rows.length };
+      $("airdrop-sub").textContent = `${rows.length} recipients — they receive their tokens inside the same creation transaction`;
       airdropAttached = false; // so close doesn't clear the checkbox
       $("airdrop-modal").classList.remove("open");
+      refreshPreview();
       if (issues.length) showToast("info", `Airdrop list saved with ${issues.length} skipped line(s).`);
+    }
+
+    // mint initCalls for the in-creation airdrop; throws {message} on config errors
+    function airdropMintCalls(f) {
+      if (!$("c-airdrop").checked || !pendingAirdrop) return { calls: [], total: 0n };
+      const calls = [];
+      let total = 0n;
+      if (pendingAirdrop.mode === "percent") {
+        const base = parseAmount(pendingAirdrop.totalStr, f.decimals);
+        if (base === null || base === 0n) throw new Error("Airdrop total is missing — reopen the airdrop list and set it.");
+        for (const r of pendingAirdrop.rows) {
+          const amount = (base * BigInt(Math.round(parseFloat(r.value) * 1e6))) / 100000000n;
+          if (amount > 0n) { calls.push(encodeMint(r.address, amount)); total += amount; }
+        }
+      } else {
+        for (const r of pendingAirdrop.rows) {
+          const amount = E.parseUnits(r.value, f.decimals);
+          if (amount > 0n) { calls.push(encodeMint(r.address, amount)); total += amount; }
+        }
+      }
+      return { calls, total };
     }
 
     const showAirdropToast = (kind, html) => { $("airdrop-result").innerHTML = `<div class="toast ${kind}">${html}</div>`; };
