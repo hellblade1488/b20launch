@@ -133,6 +133,11 @@
     .token-item .t-supply { font-size: 12px; color: var(--ink); white-space: nowrap; }
     .empty { color: var(--graphite); text-align: center; padding: 22px 0; }
 
+    textarea { width: 100%; background: var(--paper); color: var(--ink); border: 1px solid var(--ink); border-radius: 0; padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; resize: vertical; }
+    textarea:focus { outline: 2px solid var(--ink); outline-offset: -1px; }
+    input[type="file"] { width: 100%; font-family: var(--font-mono); font-size: 12px; color: var(--graphite); border: 1px dashed var(--ink); padding: 10px 12px; border-radius: 0; background: var(--paper); }
+    input[type="file"]::file-selector-button { background: var(--ink); color: var(--paper); border: 1px solid var(--ink); border-radius: var(--radius-btn); font-family: var(--font-sys); font-size: 12px; font-weight: 700; padding: 5px 10px; margin-right: 10px; cursor: pointer; }
+
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
     .modal-overlay.open { display: flex; }
     .wallet-modal { background: var(--paper); border: 1px solid var(--ink); border-radius: 0; padding: 22px; width: 100%; max-width: 360px; }
@@ -276,6 +281,50 @@
       </div>
     </div>
 
+    <!-- Airdrop -->
+    <div class="card" id="airdrop-card">
+      <h2>Airdrop <span class="badge" id="airdrop-badge">batch send</span></h2>
+
+      <div class="input-row">
+        <label for="a-token">Token address <span class="hint">— a token you hold on the selected network; your launches are suggested</span></label>
+        <input type="text" id="a-token" class="mono" placeholder="0xB200…" autocomplete="off" spellcheck="false" list="a-token-list" />
+        <datalist id="a-token-list"></datalist>
+        <div class="field-error" id="e-a-token"></div>
+      </div>
+
+      <div class="variant-tabs">
+        <button type="button" class="active" id="a-mode-amounts">AMOUNTS</button>
+        <button type="button" id="a-mode-percent">% OF TOTAL</button>
+      </div>
+
+      <div class="input-row" id="a-total-row" style="display: none;">
+        <label for="a-total">Total to distribute <span class="hint">— each line's percentage is a share of this amount</span></label>
+        <input type="text" id="a-total" placeholder="e.g. 1000000" inputmode="decimal" autocomplete="off" />
+        <div class="field-error" id="e-a-total"></div>
+      </div>
+
+      <div class="input-row">
+        <label for="a-list">Recipients <span class="hint">— one per line: address, value. Separators: comma, semicolon, tab or space</span></label>
+        <textarea id="a-list" rows="6" placeholder="0x1234…abcd, 1000&#10;0x5678…ef01, 2500" spellcheck="false"></textarea>
+        <div class="field-error" id="e-a-list"></div>
+      </div>
+
+      <div class="input-row">
+        <label for="a-file">Or upload a file <span class="hint">— .csv / .txt / .xlsx, first two columns: address, value</span></label>
+        <input type="file" id="a-file" accept=".csv,.txt,.xlsx" />
+      </div>
+
+      <div class="preview-box" id="a-preview" style="display: none;">
+        <div class="row"><span>Valid recipients</span><span class="val" id="a-p-count">—</span></div>
+        <div class="row"><span>Total to send</span><span class="val" id="a-p-total">—</span></div>
+        <div class="row"><span>Your balance</span><span class="val" id="a-p-balance">—</span></div>
+        <div class="row" id="a-p-issues-row" style="display: none;"><span>Skipped lines</span><span class="val" id="a-p-issues">—</span></div>
+      </div>
+
+      <button class="send-btn" id="airdrop-btn" disabled>Connect wallet to airdrop</button>
+      <div id="airdrop-result"></div>
+    </div>
+
     <!-- My tokens -->
     <div class="card" id="mytokens-card">
       <h2>My tokens</h2>
@@ -315,6 +364,7 @@
         rpcs: ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.drpc.org", "https://1rpc.io/base"],
         scan: "https://basescan.org",
         launchpad: "0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71", // B20LaunchPad, deployed 2026-07-14
+        airdrop: "", // B20Airdrop — pending deploy
         badge: "Base Mainnet", badgeClass: "",
       },
       "84532": {
@@ -324,6 +374,7 @@
         rpcs: ["https://sepolia.base.org", "https://base-sepolia-rpc.publicnode.com"],
         scan: "https://sepolia.basescan.org",
         launchpad: "0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90", // B20LaunchPad, deployed 2026-07-14
+        airdrop: "", // B20Airdrop — pending deploy
         badge: "Base Sepolia", badgeClass: "testnet",
       },
     };
@@ -386,12 +437,28 @@
       "error InitCallFailed(uint256 index)",
       "error FeatureNotActivated(bytes32 feature)",
     ];
-    const ERROR_IFACE = new E.Interface([...FACTORY_ERRORS, "error WrongFee(uint256 sent, uint256 required)"]);
+    const ERROR_IFACE = new E.Interface([
+      ...FACTORY_ERRORS,
+      "error WrongFee(uint256 sent, uint256 required)",
+      "error LengthMismatch()",
+      "error EmptyBatch()",
+      "error TransferFailed(uint256 index)",
+    ]);
     const TOKEN_ABI = [
       "function name() view returns (string)",
       "function symbol() view returns (string)",
       "function decimals() view returns (uint8)",
       "function totalSupply() view returns (uint256)",
+      "function balanceOf(address) view returns (uint256)",
+      "function allowance(address owner, address spender) view returns (uint256)",
+      "function approve(address spender, uint256 amount) returns (bool)",
+    ];
+    const AIRDROP_ABI = [
+      "function disperse(address token, address[] recipients, uint256[] amounts)",
+      "error LengthMismatch()",
+      "error EmptyBatch()",
+      "error TransferFailed(uint256 index)",
+      "event Airdropped(address indexed sender, address indexed token, uint256 recipients, uint256 total)",
     ];
 
     /* ========== JS port of B20FactoryLib (validated against Sepolia factory via eth_call) ========== */
@@ -459,6 +526,7 @@
             InvalidCurrency: "Currency code must be uppercase A–Z letters only.",
             MissingRequiredField: "A required field is empty.",
             InitCallFailed: "One of the setup calls failed — check supply cap vs initial supply.",
+            TransferFailed: "A transfer in the batch failed — insufficient balance or a policy-restricted recipient.",
             FeatureNotActivated: "B20 is not activated on this network.",
             WrongFee: "Fee mismatch — reload the page and try again.",
           }[parsed.name];
@@ -621,6 +689,7 @@
         pAddr.textContent = "connect wallet to preview";
         pGas.textContent = "—";
         renderTokens();
+        updateAirdropButton();
         return;
       }
       renderConnected(!!conf);
@@ -635,13 +704,16 @@
         launchBtn.disabled = true;
         launchBtn.textContent = "Wrong network";
         renderTokens();
+        updateAirdropButton();
         return;
       }
       if (!$("f-admin").value) $("f-admin").value = userAddress;
       roTry(String(currentChainId), (p) => p.getBlockNumber()).catch(() => {}); // warm up RPC connections
       checkActivationAndContract();
       renderTokens();
+      updateAirdropButton();
       refreshPreview();
+      refreshAirdropPreview();
     }
 
     /* ========== activation + contract presence check ========== */
@@ -924,6 +996,8 @@
         mine = saved.concat(recovered.filter((t) => !known.has(t.address.toLowerCase())));
       }
       if (!mine.length) { tokenList.innerHTML = `<div class="empty">No tokens yet — your launches will show up here.</div>`; return; }
+      const dl = $("a-token-list");
+      if (dl) dl.innerHTML = mine.map((t) => `<option value="${t.address}">${escapeHtml(t.name || "")}${t.symbol ? " $" + escapeHtml(t.symbol) : ""}</option>`).join("");
       tokenList.innerHTML = mine.map((t, i) => {
         const conf = NETWORKS[t.chainId];
         const scan = conf ? `${conf.scan}/token/${t.address}` : "#";
@@ -946,6 +1020,174 @@
           if (supplyEl) supplyEl.textContent = `${Number(E.formatUnits(supply, dec)).toLocaleString()} ${sym}`;
           if (!t.name) { const n = $(`name-${i}`), s = $(`sym-${i}`); if (n) n.textContent = nm || "(unnamed)"; if (s) s.textContent = sym ? "$" + sym : ""; }
         } catch { const el = $(`supply-${i}`); if (el) el.textContent = ""; }
+      }
+    }
+
+    /* ========== airdrop ========== */
+    let airdropMode = "amounts"; // "amounts" | "percent"
+    let airdropBusy = false;
+    const tokenMetaCache = {}; // chain|address -> {decimals, symbol}
+
+    function ensureXlsxLib() {
+      if (window.XLSX) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = "./assets/xlsx-0.20.3.mini.min.js";
+        s.onload = res; s.onerror = () => rej(new Error("failed to load xlsx parser"));
+        document.head.appendChild(s);
+      });
+    }
+
+    function parseAirdropLines(text) {
+      const rows = [], issues = [];
+      const lines = text.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i].trim();
+        if (!raw) continue;
+        let parts = raw.split(/[,;\t]+/).map((s) => s.trim()).filter(Boolean);
+        if (parts.length === 1) parts = raw.split(/\s+/).filter(Boolean);
+        if (!E.isAddress(parts[0])) {
+          if (i === 0 && !parts[0].toLowerCase().startsWith("0x")) continue; // tolerate a header row
+          issues.push(`line ${i + 1}: bad address`);
+          continue;
+        }
+        if (parts.length < 2) { issues.push(`line ${i + 1}: missing value`); continue; }
+        const val = parts[1].replace("%", "").trim();
+        if (!/^\d+(\.\d+)?$/.test(val) || parseFloat(val) === 0) { issues.push(`line ${i + 1}: bad value "${parts[1]}"`); continue; }
+        rows.push({ address: E.getAddress(parts[0]), value: val });
+      }
+      return { rows, issues };
+    }
+
+    async function airdropTokenMeta(addr) {
+      const key = currentChainId + "|" + addr.toLowerCase();
+      if (tokenMetaCache[key]) return tokenMetaCache[key];
+      const meta = await roTry(String(currentChainId), async (p) => {
+        const c = new E.Contract(addr, TOKEN_ABI, p);
+        const [decimals, symbol, balance] = await Promise.all([c.decimals(), c.symbol(), c.balanceOf(userAddress)]);
+        return { decimals: Number(decimals), symbol, balance };
+      });
+      tokenMetaCache[key] = meta;
+      return meta;
+    }
+
+    // returns {list, total, meta} or null (with field errors set)
+    async function buildAirdrop() {
+      const tokenRaw = $("a-token").value.trim();
+      let ok = true;
+      ok = setFieldError($("a-token"), $("e-a-token"), E.isAddress(tokenRaw) ? "" : "Enter a valid token address") && ok;
+      const { rows, issues } = parseAirdropLines($("a-list").value);
+      ok = setFieldError($("a-list"), $("e-a-list"), rows.length ? "" : "No valid recipient lines") && ok;
+      if (!ok) return null;
+
+      let meta;
+      try { meta = await airdropTokenMeta(E.getAddress(tokenRaw)); }
+      catch { setFieldError($("a-token"), $("e-a-token"), "Could not read this token on the selected network"); return null; }
+
+      let list;
+      if (airdropMode === "percent") {
+        const totalRaw = $("a-total").value;
+        let total = null;
+        try { total = parseAmount(totalRaw, meta.decimals); } catch {}
+        if (total === null || total === 0n) { setFieldError($("a-total"), $("e-a-total"), "Total to distribute is required in % mode"); return null; }
+        setFieldError($("a-total"), $("e-a-total"), "");
+        const pctSum = rows.reduce((s, r) => s + parseFloat(r.value), 0);
+        if (pctSum > 100.000001) { setFieldError($("a-list"), $("e-a-list"), `Percentages add up to ${pctSum.toFixed(2)}% — must be ≤ 100%`); return null; }
+        list = rows.map((r) => ({ ...r, amount: (total * BigInt(Math.round(parseFloat(r.value) * 1e6))) / 100000000n }));
+      } else {
+        try { list = rows.map((r) => ({ ...r, amount: E.parseUnits(r.value, meta.decimals) })); }
+        catch { setFieldError($("a-list"), $("e-a-list"), "A value does not fit this token's decimals"); return null; }
+      }
+      list = list.filter((r) => r.amount > 0n);
+      const totalSend = list.reduce((s, r) => s + r.amount, 0n);
+      return { token: E.getAddress(tokenRaw), list, totalSend, meta, issues };
+    }
+
+    let airdropPreviewTimer = null;
+    function refreshAirdropPreview() { clearTimeout(airdropPreviewTimer); airdropPreviewTimer = setTimeout(doAirdropPreview, 600); }
+    async function doAirdropPreview() {
+      if (!userAddress || !netConf()) return;
+      const box = $("a-preview");
+      const built = await buildAirdrop().catch(() => null);
+      if (!built) { box.style.display = "none"; return; }
+      box.style.display = "";
+      const fmt = (v) => Number(E.formatUnits(v, built.meta.decimals)).toLocaleString("en-US");
+      $("a-p-count").textContent = String(built.list.length);
+      $("a-p-total").textContent = `${fmt(built.totalSend)} ${built.meta.symbol}`;
+      $("a-p-balance").textContent = `${fmt(built.meta.balance)} ${built.meta.symbol}${built.meta.balance < built.totalSend ? " — NOT ENOUGH" : ""}`;
+      $("a-p-issues-row").style.display = built.issues.length ? "" : "none";
+      $("a-p-issues").textContent = built.issues.slice(0, 5).join("; ") + (built.issues.length > 5 ? ` … +${built.issues.length - 5} more` : "");
+    }
+
+    function updateAirdropButton() {
+      const btn = $("airdrop-btn");
+      const conf = netConf();
+      if (!userAddress) { btn.disabled = true; btn.textContent = "Connect wallet to airdrop"; return; }
+      if (!conf) { btn.disabled = true; btn.textContent = "Wrong network"; return; }
+      if (!conf.airdrop) { btn.disabled = true; btn.textContent = "Contract pending deploy"; return; }
+      btn.disabled = false; btn.textContent = "Send airdrop";
+    }
+
+    const showAirdropToast = (kind, html) => { $("airdrop-result").innerHTML = `<div class="toast ${kind}">${html}</div>`; };
+
+    async function runAirdrop() {
+      if (airdropBusy) return;
+      const conf = netConf();
+      if (!signer || !conf?.airdrop) return;
+      const built = await buildAirdrop();
+      if (!built) { showAirdropToast("error", "Fix the highlighted fields first."); return; }
+      if (built.meta.balance < built.totalSend) { showAirdropToast("error", "Total exceeds your token balance."); return; }
+
+      airdropBusy = true;
+      const btn = $("airdrop-btn");
+      btn.disabled = true;
+      const chainKey = String(currentChainId);
+      const fmt = (v) => Number(E.formatUnits(v, built.meta.decimals)).toLocaleString("en-US");
+      try {
+        // 1. exact allowance for the total — no unlimited approvals
+        const allowance = await roTry(chainKey, (p) => new E.Contract(built.token, TOKEN_ABI, p).allowance(userAddress, conf.airdrop));
+        if (allowance < built.totalSend) {
+          showAirdropToast("info", `Step 1/2 — approve ${fmt(built.totalSend)} ${built.meta.symbol} in your wallet…`);
+          btn.textContent = "Confirm approval…";
+          const tokenW = new E.Contract(built.token, TOKEN_ABI, signer);
+          const gasA = await roTry(chainKey, (p) => p.estimateGas({ from: userAddress, to: built.token, data: tokenW.interface.encodeFunctionData("approve", [conf.airdrop, built.totalSend]) }));
+          const txA = await tokenW.approve(conf.airdrop, built.totalSend, { gasLimit: (gasA * 130n) / 100n });
+          showAirdropToast("info", `Approval sent — waiting… <a href="${conf.scan}/tx/${txA.hash}" target="_blank" rel="noopener">view tx</a>`);
+          let rA = null; try { rA = await txA.wait(); } catch {}
+          if (!rA) rA = await waitForReceipt(chainKey, txA.hash);
+          if (!rA || rA.status !== 1) { showAirdropToast("error", "Approval did not confirm — try again."); return; }
+        }
+
+        // 2. disperse in batches
+        const BATCH = 250;
+        const batches = [];
+        for (let off = 0; off < built.list.length; off += BATCH) batches.push(built.list.slice(off, off + BATCH));
+        const drop = new E.Contract(conf.airdrop, AIRDROP_ABI, signer);
+        for (let b = 0; b < batches.length; b++) {
+          const recips = batches[b].map((r) => r.address);
+          const amts = batches[b].map((r) => r.amount);
+          const step = batches.length > 1 ? ` (batch ${b + 1}/${batches.length})` : "";
+          showAirdropToast("info", `Simulating${step}…`);
+          btn.textContent = `Simulating${step}…`;
+          await roTry(chainKey, (p) => new E.Contract(conf.airdrop, AIRDROP_ABI, p).disperse.staticCall(built.token, recips, amts, { from: userAddress }));
+          const gasD = await roTry(chainKey, (p) => p.estimateGas({ from: userAddress, to: conf.airdrop, data: drop.interface.encodeFunctionData("disperse", [built.token, recips, amts]) }));
+          showAirdropToast("info", `Confirm in wallet${step}…`);
+          btn.textContent = `Confirm in wallet${step}…`;
+          const tx = await drop.disperse(built.token, recips, amts, { gasLimit: (gasD * 130n) / 100n });
+          showAirdropToast("info", `Waiting for confirmation${step}… <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">view tx</a>`);
+          btn.textContent = `Waiting${step}…`;
+          let r = null; try { r = await tx.wait(); } catch {}
+          if (!r) r = await waitForReceipt(chainKey, tx.hash);
+          if (!r) { showAirdropToast("info", `Batch sent, network is slow — track it on <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">BaseScan</a>.`); return; }
+          if (r.status !== 1) { showAirdropToast("error", `Batch ${b + 1} reverted — see <a href="${conf.scan}/tx/${tx.hash}" target="_blank" rel="noopener">BaseScan</a>.`); return; }
+        }
+        showAirdropToast("success", `Airdrop complete: ${fmt(built.totalSend)} ${built.meta.symbol} sent to ${built.list.length} recipients.`);
+        delete tokenMetaCache[chainKey + "|" + built.token.toLowerCase()];
+      } catch (e) {
+        showAirdropToast("error", escapeHtml(decodeError(e)));
+      } finally {
+        airdropBusy = false;
+        updateAirdropButton();
       }
     }
 
@@ -983,6 +1225,37 @@
       launchBtn.addEventListener("click", launch);
       ["f-name", "f-symbol", "f-decimals", "f-cap", "f-mint", "f-admin", "f-currency"].forEach((id) => $(id).addEventListener("input", refreshPreview));
       ["c-mint-role", "c-pause-role"].forEach((id) => $(id).addEventListener("change", refreshPreview));
+
+      // airdrop
+      $("airdrop-btn").addEventListener("click", runAirdrop);
+      ["a-token", "a-list", "a-total"].forEach((id) => $(id).addEventListener("input", refreshAirdropPreview));
+      const setAirdropMode = (m) => {
+        airdropMode = m;
+        $("a-mode-amounts").classList.toggle("active", m === "amounts");
+        $("a-mode-percent").classList.toggle("active", m === "percent");
+        $("a-total-row").style.display = m === "percent" ? "" : "none";
+        refreshAirdropPreview();
+      };
+      $("a-mode-amounts").addEventListener("click", () => setAirdropMode("amounts"));
+      $("a-mode-percent").addEventListener("click", () => setAirdropMode("percent"));
+      $("a-file").addEventListener("change", async (ev) => {
+        const file = ev.target.files[0];
+        if (!file) return;
+        try {
+          let text;
+          if (/\.xlsx$/i.test(file.name)) {
+            await ensureXlsxLib();
+            const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+            text = XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]);
+          } else {
+            text = await file.text();
+          }
+          $("a-list").value = text.trim();
+          refreshAirdropPreview();
+        } catch (e) {
+          setFieldError($("a-list"), $("e-a-list"), "Could not read the file: " + (e.message || "unknown error"));
+        }
+      });
 
       $("s-copy").addEventListener("click", async () => {
         try { await navigator.clipboard.writeText($("s-addr").textContent); $("s-copy").textContent = "Copied ✓"; setTimeout(() => ($("s-copy").textContent = "Copy address"), 1500); } catch {}

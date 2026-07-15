@@ -29,10 +29,10 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the technical details.
 
 ## Deployments
 
-| Network | B20LaunchPad |
-|---|---|
-| Base Sepolia | [`0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90`](https://sepolia.basescan.org/address/0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90) |
-| Base Mainnet | [`0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71`](https://basescan.org/address/0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71) |
+| Network | B20LaunchPad | B20Airdrop |
+|---|---|---|
+| Base Sepolia | [`0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90`](https://sepolia.basescan.org/address/0xD29C661d881fA901C6f0a00F56Afb9Ca86b62f90) | *(pending)* |
+| Base Mainnet | [`0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71`](https://basescan.org/address/0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71) | *(pending)* |
 
 ## Stack
 
