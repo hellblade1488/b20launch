@@ -91,6 +91,8 @@
     .input-row { margin-bottom: 16px; }
     .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .mono { font-family: var(--font-mono); }
+    .mini-btn { background: var(--paper); color: var(--ink); border: 1px solid var(--ink); border-radius: var(--radius-btn); font-family: var(--font-sys); font-size: 12px; font-weight: 700; padding: 4px 10px; }
+    .mini-btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
 
     .variant-tabs { display: flex; gap: 5px; margin-bottom: 22px; }
     .variant-tabs button { flex: 1; background: var(--paper); border: 1px solid var(--ink); color: var(--ink); border-radius: var(--radius-btn); padding: 10px; font-family: var(--font-sys); font-size: 14px; font-weight: 700; }
@@ -255,6 +257,11 @@
         <label for="c-pause-role">Grant <b>PAUSE_ROLE</b> + <b>UNPAUSE_ROLE</b> to admin
           <span class="sub">lets the admin freeze all transfers in an emergency</span></label>
       </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="c-airdrop" />
+        <label for="c-airdrop">Airdrop after launch
+          <span class="sub" id="airdrop-sub">distribute the new token to a list of wallets right after it is created</span></label>
+      </div>
 
       <div class="toast info" id="stable-note" style="display: none; margin: 0 0 1rem;">
         A B20 stablecoin carries a self-declared currency code. It does not make your token backed, pegged or regulated — you are responsible for any claims made to holders.
@@ -281,11 +288,20 @@
       </div>
     </div>
 
-    <!-- Airdrop -->
-    <div class="card" id="airdrop-card">
-      <h2>Airdrop <span class="badge" id="airdrop-badge">batch send</span></h2>
+    <!-- My tokens -->
+    <div class="card" id="mytokens-card">
+      <h2>My tokens <button class="mini-btn" id="open-airdrop" type="button">Airdrop</button></h2>
+      <div class="token-list" id="token-list">
+        <div class="empty" id="token-empty">Connect your wallet to see tokens you launched.</div>
+      </div>
+    </div>
+  </main>
 
-      <div class="input-row">
+  <div class="modal-overlay" id="airdrop-modal">
+    <div class="wallet-modal" style="max-width: 620px; max-height: 90vh; overflow-y: auto;">
+      <h3>Airdrop <span class="hint" id="airdrop-mode-note" style="text-transform: none; letter-spacing: normal; color: var(--graphite);"></span></h3>
+
+      <div class="input-row" id="a-token-row">
         <label for="a-token">Token address <span class="hint">— a token you hold on the selected network; your launches are suggested</span></label>
         <input type="text" id="a-token" class="mono" placeholder="0xB200…" autocomplete="off" spellcheck="false" list="a-token-list" />
         <datalist id="a-token-list"></datalist>
@@ -323,16 +339,9 @@
 
       <button class="send-btn" id="airdrop-btn" disabled>Connect wallet to airdrop</button>
       <div id="airdrop-result"></div>
+      <button class="wallet-cancel" id="airdrop-close" type="button" style="margin-top: 10px;">Close</button>
     </div>
-
-    <!-- My tokens -->
-    <div class="card" id="mytokens-card">
-      <h2>My tokens</h2>
-      <div class="token-list" id="token-list">
-        <div class="empty" id="token-empty">Connect your wallet to see tokens you launched.</div>
-      </div>
-    </div>
-  </main>
+  </div>
 
   <div class="modal-overlay" id="wallet-modal">
     <div class="wallet-modal">
@@ -937,6 +946,14 @@
         clearToast();
         showSuccess(token, f, conf);
         renderTokens();
+
+        // attached airdrop: run it now with the freshly created token
+        if ($("c-airdrop").checked && pendingAirdrop) {
+          $("a-token").value = token;
+          openAirdropModal(false);
+          showAirdropToast("info", "Token created — starting the airdrop…");
+          runAirdrop();
+        }
       } catch (e) {
         showToast("error", escapeHtml(decodeError(e)));
       } finally {
@@ -1026,6 +1043,26 @@
     /* ========== airdrop ========== */
     let airdropMode = "amounts"; // "amounts" | "percent"
     let airdropBusy = false;
+    let airdropAttached = false; // true = editing the list for a token that is about to be launched
+    let pendingAirdrop = null;   // {count} — validated list saved for the post-launch run
+
+    function openAirdropModal(attached) {
+      airdropAttached = attached;
+      $("a-token-row").style.display = attached ? "none" : "";
+      $("airdrop-mode-note").textContent = attached ? "— for the token you are about to launch" : "";
+      $("airdrop-result").innerHTML = "";
+      $("airdrop-modal").classList.add("open");
+      updateAirdropButton();
+      refreshAirdropPreview();
+    }
+    function closeAirdropModal() {
+      $("airdrop-modal").classList.remove("open");
+      if (airdropAttached && !pendingAirdrop) {
+        $("c-airdrop").checked = false;
+        $("airdrop-sub").textContent = "distribute the new token to a list of wallets right after it is created";
+      }
+      airdropAttached = false;
+    }
     const tokenMetaCache = {}; // chain|address -> {decimals, symbol}
 
     function ensureXlsxLib() {
@@ -1106,8 +1143,23 @@
     let airdropPreviewTimer = null;
     function refreshAirdropPreview() { clearTimeout(airdropPreviewTimer); airdropPreviewTimer = setTimeout(doAirdropPreview, 600); }
     async function doAirdropPreview() {
-      if (!userAddress || !netConf()) return;
       const box = $("a-preview");
+      if (airdropAttached) {
+        // token does not exist yet — validate the list only
+        const { rows, issues } = parseAirdropLines($("a-list").value);
+        if (!rows.length && !issues.length) { box.style.display = "none"; return; }
+        box.style.display = "";
+        $("a-p-count").textContent = String(rows.length);
+        const pctSum = rows.reduce((s, r) => s + parseFloat(r.value), 0);
+        $("a-p-total").textContent = airdropMode === "percent"
+          ? `${pctSum.toFixed(2)}% of the total you set${pctSum > 100.000001 ? " — OVER 100%" : ""}`
+          : rows.reduce((s, r) => s + parseFloat(r.value), 0).toLocaleString("en-US") + " tokens";
+        $("a-p-balance").textContent = "checked after launch";
+        $("a-p-issues-row").style.display = issues.length ? "" : "none";
+        $("a-p-issues").textContent = issues.slice(0, 5).join("; ") + (issues.length > 5 ? ` … +${issues.length - 5} more` : "");
+        return;
+      }
+      if (!userAddress || !netConf()) return;
       const built = await buildAirdrop().catch(() => null);
       if (!built) { box.style.display = "none"; return; }
       box.style.display = "";
@@ -1122,10 +1174,30 @@
     function updateAirdropButton() {
       const btn = $("airdrop-btn");
       const conf = netConf();
+      if (airdropAttached) { btn.disabled = false; btn.textContent = "Save airdrop list"; return; }
       if (!userAddress) { btn.disabled = true; btn.textContent = "Connect wallet to airdrop"; return; }
       if (!conf) { btn.disabled = true; btn.textContent = "Wrong network"; return; }
       if (!conf.airdrop) { btn.disabled = true; btn.textContent = "Contract pending deploy"; return; }
       btn.disabled = false; btn.textContent = "Send airdrop";
+    }
+
+    function saveAttachedAirdrop() {
+      const { rows, issues } = parseAirdropLines($("a-list").value);
+      if (!rows.length) { setFieldError($("a-list"), $("e-a-list"), "No valid recipient lines"); return; }
+      setFieldError($("a-list"), $("e-a-list"), "");
+      if (airdropMode === "percent") {
+        const pctSum = rows.reduce((s, r) => s + parseFloat(r.value), 0);
+        if (pctSum > 100.000001) { setFieldError($("a-list"), $("e-a-list"), `Percentages add up to ${pctSum.toFixed(2)}% — must be ≤ 100%`); return; }
+        let total = null;
+        try { total = parseAmount($("a-total").value, 18); } catch {}
+        if (total === null || total === 0n) { setFieldError($("a-total"), $("e-a-total"), "Total to distribute is required in % mode"); return; }
+        setFieldError($("a-total"), $("e-a-total"), "");
+      }
+      pendingAirdrop = { count: rows.length };
+      $("airdrop-sub").textContent = `${rows.length} recipients ready — the airdrop will start right after the launch confirms`;
+      airdropAttached = false; // so close doesn't clear the checkbox
+      $("airdrop-modal").classList.remove("open");
+      if (issues.length) showToast("info", `Airdrop list saved with ${issues.length} skipped line(s).`);
     }
 
     const showAirdropToast = (kind, html) => { $("airdrop-result").innerHTML = `<div class="toast ${kind}">${html}</div>`; };
@@ -1227,7 +1299,14 @@
       ["c-mint-role", "c-pause-role"].forEach((id) => $(id).addEventListener("change", refreshPreview));
 
       // airdrop
-      $("airdrop-btn").addEventListener("click", runAirdrop);
+      $("airdrop-btn").addEventListener("click", () => { airdropAttached ? saveAttachedAirdrop() : runAirdrop(); });
+      $("airdrop-close").addEventListener("click", closeAirdropModal);
+      $("airdrop-modal").addEventListener("click", (e) => { if (e.target === $("airdrop-modal") && !airdropBusy) closeAirdropModal(); });
+      $("open-airdrop").addEventListener("click", () => openAirdropModal(false));
+      $("c-airdrop").addEventListener("change", () => {
+        if ($("c-airdrop").checked) { openAirdropModal(true); }
+        else { pendingAirdrop = null; $("airdrop-sub").textContent = "distribute the new token to a list of wallets right after it is created"; }
+      });
       ["a-token", "a-list", "a-total"].forEach((id) => $(id).addEventListener("input", refreshAirdropPreview));
       const setAirdropMode = (m) => {
         airdropMode = m;
