@@ -970,7 +970,7 @@
     function showSuccess(token, f, conf) {
       $("s-addr").textContent = token;
       $("s-scan").href = `${conf.scan}/token/${token}`;
-      const text = encodeURIComponent(`Just launched $${f.symbol} — a native B20 token on @base — in one transaction with b20launch.com\n\n${conf.scan}/token/${token}`);
+      const text = encodeURIComponent(`Just launched $${f.symbol} — a native B20 token on @base — in one transaction with b20launch.com\n\nMinted by Base's own B20 precompile. The launcher is open source and keeps zero roles in the token: github.com/hellblade1488/b20launch\n\n${conf.scan}/token/${token}`);
       $("s-share").href = `https://twitter.com/intent/tweet?text=${text}`;
       successCard.style.display = "block";
       successCard.scrollIntoView({ behavior: "smooth", block: "center" });
