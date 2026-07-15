@@ -160,7 +160,7 @@
 <body>
 
   <header class="topbar">
-    <div class="brand">B20&#8212;LAUNCH</div>
+    <a class="brand" href="./">B20&#8212;LAUNCH</a>
     <div class="topbar-right">
       <div class="wallet-area" id="wallet-area">
         <button id="connect-btn">Connect Wallet</button>
@@ -981,8 +981,8 @@
 
       const THEME_KEY = "b20launch_theme";
       const applyTheme = (t) => { document.documentElement.dataset.theme = t; try { localStorage.setItem(THEME_KEY, t); } catch {} };
-      let theme = "light";
-      try { theme = localStorage.getItem(THEME_KEY) || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); } catch {}
+      let theme = "light"; // light is the default; dark is opt-in via the toggle only
+      try { theme = localStorage.getItem(THEME_KEY) || "light"; } catch {}
       applyTheme(theme);
       $("theme-toggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 
