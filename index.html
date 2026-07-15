@@ -355,7 +355,7 @@
     <div>
       <a href="https://github.com/hellblade1488/b20launch" target="_blank" rel="noopener">GitHub</a> ·
       <a href="https://docs.base.org/get-started/launch-b20-token" target="_blank" rel="noopener">What is B20?</a> ·
-      <a href="#" id="footer-contract" target="_blank" rel="noopener">Launcher contract</a>
+      <a href="https://basescan.org/address/0x122AA0Aa32930Ed663Fd5cE07c8372AAb17e9b71#code" id="footer-contract" target="_blank" rel="noopener">Launcher contract</a>
     </div>
     <div style="margin-top: 0.5rem;">Built on Base by <a href="https://github.com/hellblade1488" target="_blank" rel="noopener">hellblade1488</a> · Owner: <a href="https://x.com/35nine" target="_blank" rel="noopener">X</a> · MIT</div>
   </footer>
@@ -748,7 +748,7 @@
           launchBtn.textContent = "Contract pending deploy";
           return;
         }
-        $("footer-contract").href = `${conf.scan}/address/${conf.launchpad}`;
+        $("footer-contract").href = `${conf.scan}/address/${conf.launchpad}#code`;
         launchBtn.disabled = false;
         launchBtn.textContent = "Launch token";
       } catch {
