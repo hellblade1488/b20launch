@@ -216,14 +216,14 @@
           <div class="field-error" id="e-currency"></div>
         </div>
         <div class="input-row">
-          <label for="f-cap">Supply cap <span class="hint">— leave empty for no cap</span></label>
+          <label for="f-cap">Supply cap <span class="hint">— ceiling only, mints nothing; empty = no cap</span></label>
           <input type="text" id="f-cap" placeholder="e.g. 21000000" inputmode="decimal" autocomplete="off" />
           <div class="field-error" id="e-cap"></div>
         </div>
       </div>
 
       <div class="input-row">
-        <label for="f-mint">Initial supply <span class="hint">— minted to you at creation; leave empty to start at 0</span></label>
+        <label for="f-mint">Initial supply <span class="hint">— the day-one total supply: actually minted at creation, all of it to your wallet</span></label>
         <input type="text" id="f-mint" placeholder="e.g. 1000000" inputmode="decimal" autocomplete="off" />
         <div class="field-error" id="e-mint"></div>
       </div>
@@ -256,6 +256,7 @@
       </div>
 
       <div class="preview-box" id="preview-box">
+        <div class="row"><span>At launch</span><span class="val" id="p-summary">—</span></div>
         <div class="row"><span>Your token address</span><span class="val" id="p-addr">connect wallet to preview</span></div>
         <div class="row"><span>Estimated gas cost</span><span class="val" id="p-gas">—</span></div>
       </div>
@@ -764,9 +765,17 @@
     function refreshPreview() { clearTimeout(previewTimer); previewTimer = setTimeout(doPreview, 500); }
 
     async function doPreview() {
+      const f = readForm();
+      const sum = $("p-summary");
+      if (f.ok) {
+        const minted = f.mint !== null && f.mint > 0n
+          ? `${Number(E.formatUnits(f.mint, f.decimals)).toLocaleString("en-US")} ${f.symbol || "tokens"} minted to your wallet`
+          : "0 minted — supply starts empty";
+        const capTxt = f.cap !== null ? `cap ${Number(E.formatUnits(f.cap, f.decimals)).toLocaleString("en-US")} (ceiling, not minted)` : "no cap";
+        sum.textContent = `${minted} · ${capTxt}`;
+      } else { sum.textContent = "—"; }
       const conf = netConf();
       if (!userAddress || !conf || !conf.launchpad) return;
-      const f = readForm();
       if (!f.ok || !f.admin) { pAddr.textContent = "fix the form to preview"; pGas.textContent = "—"; return; }
       try {
         const salt = E.keccak256(E.toUtf8Bytes("preview")); // address depends on salt; show shape only for a fixed one
